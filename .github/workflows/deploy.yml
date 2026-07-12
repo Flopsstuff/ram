@@ -1,0 +1,141 @@
+# Deploy the ram shared-brain stack (markdown-vault-mcp + cloudflared) to a
+# self-hosted runner via docker compose.
+#
+# Prerequisites on the runner host:
+#   - Docker Engine + Compose v2 plugin (`docker compose`) installed
+#   - The runner user can run docker (in the `docker` group)
+#   - Outbound internet (cloudflared dials Cloudflare; the health probe hits the public URL)
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   DOTENV             — FULL contents of your local .env, verbatim (incl.
+#                        TUNNEL_CRED_CONTENTS + the OIDC_* vars, on one line each).
+#   CLOUDFLARED_CONFIG — FULL contents of cloudflared/config.yml (ingress rules).
+#   AUTHELIA_CONFIG    — FULL contents of authelia/configuration.yml (OIDC + secrets).
+#   AUTHELIA_USERS     — FULL contents of authelia/users_database.yml (allowlist).
+# The last three are gitignored locally; they must be provided as secrets because
+# checkout's `git clean` wipes untracked files on every deploy.
+#
+# If your runner uses a custom label, change `runs-on` below.
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  # Weekly maintenance deploy: `docker compose pull` grabs the latest
+  # markdown-vault-mcp image, then redeploys. GitHub cron is UTC and does NOT
+  # follow DST, so 01:00 UTC Saturday = 02:00 Warsaw in winter (CET) / 03:00 in
+  # summer (CEST). The self-hosted runner must be online at that time.
+  schedule:
+    - cron: '0 1 * * 6'
+
+# Never let two deploys run at once; queue instead of clobbering.
+concurrency:
+  group: ram-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Written AFTER checkout on purpose: checkout's `git clean` wipes untracked
+      # files (incl. a leftover .env from a previous run), so we always rewrite it.
+      - name: Materialize .env from secret
+        env:
+          DOTENV: ${{ secrets.DOTENV }}
+        run: |
+          if [ -z "$DOTENV" ]; then
+            echo "::error::DOTENV secret is empty or unset — set it in repo settings."
+            exit 1
+          fi
+          umask 077
+          printf '%s\n' "$DOTENV" > .env
+          echo "Wrote .env ($(wc -l < .env) lines)."
+
+      # Same reason as .env: checkout's `git clean` wipes these gitignored config
+      # files, so re-materialize them from secrets every run. They carry secrets
+      # and the real hostnames, so they live in GitHub secrets, not in git.
+      #   CLOUDFLARED_CONFIG → cloudflared/config.yml (ingress + tunnel id)
+      #   AUTHELIA_CONFIG    → authelia/configuration.yml (OIDC provider + secrets + JWKS)
+      #   AUTHELIA_USERS     → authelia/users_database.yml (the single-user allowlist)
+      - name: Materialize service configs from secrets
+        env:
+          CLOUDFLARED_CONFIG: ${{ secrets.CLOUDFLARED_CONFIG }}
+          AUTHELIA_CONFIG: ${{ secrets.AUTHELIA_CONFIG }}
+          AUTHELIA_USERS: ${{ secrets.AUTHELIA_USERS }}
+        run: |
+          umask 077
+          for pair in \
+            "CLOUDFLARED_CONFIG:cloudflared/config.yml" \
+            "AUTHELIA_CONFIG:authelia/configuration.yml" \
+            "AUTHELIA_USERS:authelia/users_database.yml"; do
+            var="${pair%%:*}"; path="${pair#*:}"
+            val="${!var}"
+            if [ -z "$val" ]; then
+              echo "::error::$var secret is empty or unset — set it in repo settings."
+              exit 1
+            fi
+            mkdir -p "$(dirname "$path")"
+            printf '%s\n' "$val" > "$path"
+            echo "Wrote $path ($(wc -l < "$path") lines)."
+          done
+
+      - name: Pull latest images
+        run: docker compose pull
+
+      - name: Deploy
+        run: docker compose up -d --remove-orphans
+
+      # `up -d` recreates a container only when its image/env/volume-definition
+      # changes — NOT when a bind-mounted config FILE's contents change. cloudflared
+      # and authelia read their config from bind-mounted files that we re-materialize
+      # from secrets every run, so force-recreate them to guarantee the new config is
+      # actually loaded (markdown-vault-mcp already recreates on any .env change).
+      - name: Reload config-mounted services (authelia, cloudflared)
+        run: docker compose up -d --force-recreate --no-deps authelia cloudflared
+
+      - name: Prune dangling images
+        run: docker image prune -f
+
+      # Fast-fail if the server container died on boot (bad token, clone failure, …).
+      - name: Check the MCP container is up
+        run: |
+          cid=$(docker compose ps -q markdown-vault-mcp)
+          [ -n "$cid" ] || { echo "::error::mcp container not found"; exit 1; }
+          sleep 10
+          status=$(docker inspect -f '{{.State.Status}}' "$cid")
+          echo "mcp status after 10s: $status"
+          if [ "$status" != "running" ]; then
+            echo "::error::mcp container is '$status', expected running"
+            docker compose logs --tail=80 markdown-vault-mcp
+            exit 1
+          fi
+
+      # End-to-end signal: a 401 from the public URL means the tunnel is up AND
+      # the server is enforcing the bearer token. Anything else = broken deploy.
+      - name: Probe public endpoint (expect HTTP 401)
+        run: |
+          # Domain is not hardcoded here — read it from the .env we just wrote
+          # (MARKDOWN_VAULT_MCP_BASE_URL), so the real hostname lives only in the secret.
+          base=$(grep -E '^MARKDOWN_VAULT_MCP_BASE_URL=' .env | head -1 | cut -d= -f2- | tr -d '\r"')
+          [ -n "$base" ] || { echo "::error::MARKDOWN_VAULT_MCP_BASE_URL missing in .env"; exit 1; }
+          url="${base%/}/mcp"
+          for i in $(seq 1 20); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$url" || echo 000)
+            echo "probe $i: HTTP $code"
+            if [ "$code" = "401" ]; then
+              echo "healthy — tunnel up, auth enforced"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::never got HTTP 401 from $url (tunnel/DNS/app issue)"
+          docker compose logs --tail=50 cloudflared markdown-vault-mcp
+          exit 1

@@ -1,0 +1,94 @@
+# ram — Random Agents Memories
+# Central shared-brain MCP server + Cloudflare Tunnel ingress.
+# See the "Design rationale" section of README.md for the full rationale.
+#
+#   markdown-vault-mcp : the MCP server (managed git, FastEmbed, HTTP transport)
+#   cloudflared        : Cloudflare Tunnel (Method B, locally-managed config)
+#
+# No container publishes ports to the host. The ONLY ingress is via cloudflared.
+
+name: ram-brain
+
+services:
+  # One-shot: named volumes arrive root-owned, but the app runs as UID 1000
+  # (appuser) and the image entrypoint only fixes /data, never /vault. Without
+  # this, `git clone` into /vault fails with "Permission denied". Runs to
+  # completion before the server starts; cheap no-op on subsequent boots.
+  init-perms:
+    image: alpine:3
+    # chown is silent on success; the echoes make the log show it actually ran.
+    command: ["sh", "-c", "echo 'init-perms: fixing ownership of /vault and /data'; chown -R 1000:1000 /vault /data; echo 'init-perms: done (owner 1000:1000)'"]
+    volumes:
+      - vault-data:/vault
+      - app-data:/data
+    network_mode: none   # chown needs no network; also avoids creating a stray default net
+    restart: "no"
+
+  markdown-vault-mcp:
+    image: ghcr.io/pvliesdonk/markdown-vault-mcp:latest
+    restart: unless-stopped
+    # The app only reads instructions from MARKDOWN_VAULT_MCP_INSTRUCTIONS (env), so
+    # inject the editable ./instructions.md into it before exec'ing the server.
+    # ($$ becomes $ after compose interpolation → the shell runs $(cat ...).)
+    command:
+      - sh
+      - -c
+      - export MARKDOWN_VAULT_MCP_INSTRUCTIONS="$$(cat /etc/ram/instructions.md)"; exec markdown-vault-mcp serve --transport http --host 0.0.0.0 --port 8000
+    env_file:
+      - .env
+    volumes:
+      - vault-data:/vault                              # git-managed vault clone (persistent)
+      - app-data:/data                                 # FTS index + embeddings + session state (NOT in git)
+      - ./instructions.md:/etc/ram/instructions.md:ro  # editable server instructions
+    depends_on:
+      init-perms:
+        condition: service_completed_successfully
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    # Two public hostnames now share this one tunnel, so a single TUNNEL_URL
+    # origin no longer suffices — routing is done by ingress rules in
+    # ./cloudflared/config.yml (ram.* → mcp, auth.* → authelia). Credentials
+    # still come from the environment; only ingress moved into a file.
+    #   CF_TUNNEL_ID          which tunnel to run (.env), passed to `run <ID>`
+    #   TUNNEL_CRED_CONTENTS  tunnel credentials JSON, inline (.env)
+    #   config.yml            per-hostname ingress (mounted; gitignored real file)
+    # The public hostnames live in Cloudflare DNS + config.yml, not in compose.
+    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run ${CF_TUNNEL_ID:?set CF_TUNNEL_ID in .env}
+    environment:
+      TUNNEL_CRED_CONTENTS: ${TUNNEL_CRED_CONTENTS:?set TUNNEL_CRED_CONTENTS in .env}
+    volumes:
+      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+    depends_on:
+      - markdown-vault-mcp
+      - authelia
+    networks:
+      - brain
+
+  # OIDC identity provider for the OAuth (oidc-proxy) login path. Reachable only
+  # through cloudflared at <AUTH_DOMAIN> — no `ports:`. Config is mounted
+  # read-only; all mutable state (SQLite + notifications) is on the authelia-data
+  # named volume so the CD runner's `git clean` can't wipe it.
+  authelia:
+    image: authelia/authelia:latest
+    restart: unless-stopped
+    volumes:
+      - ./authelia/configuration.yml:/config/configuration.yml:ro
+      - ./authelia/users_database.yml:/config/users_database.yml:ro
+      - authelia-data:/var/lib/authelia
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+
+networks:
+  brain:
+    driver: bridge
+
+volumes:
+  vault-data:
+  app-data:
+  authelia-data:   # Authelia SQLite + notifications (must persist across CD git clean)

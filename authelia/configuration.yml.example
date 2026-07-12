@@ -1,0 +1,89 @@
+# Authelia — TEMPLATE (committed). Copy to configuration.yml and fill secrets +
+# real hostnames. The real configuration.yml is gitignored. On the CD runner it
+# is materialized from the AUTHELIA_CONFIG GitHub secret.
+#
+# Generate secrets (docker image authelia/authelia:latest):
+#   rand secrets : authelia crypto rand --length 64 --charset alphanumeric
+#   JWKS keypair : authelia crypto pair rsa generate --directory /keys   (paste private.pem below)
+#   client hash  : authelia crypto hash generate pbkdf2 --variant sha512 --random --random.length 72
+#                  → put the plaintext in the server's MARKDOWN_VAULT_MCP_OIDC_CLIENT_SECRET,
+#                    put the $pbkdf2-sha512$... hash in client_secret below.
+
+theme: 'dark'
+
+server:
+  address: 'tcp://:9091/'
+
+log:
+  level: 'info'
+
+authentication_backend:
+  file:
+    path: '/config/users_database.yml'
+    watch: false
+    password:
+      algorithm: 'argon2'
+
+access_control:
+  default_policy: 'one_factor'   # forward-auth unused; single-user DB is the allowlist
+
+session:
+  name: 'authelia_session'
+  secret: '<RAND_SESSION_SECRET>'
+  cookies:
+    - domain: '<COOKIE_DOMAIN>'                 # parent domain of <AUTH_DOMAIN>
+      authelia_url: 'https://<AUTH_DOMAIN>'
+      default_redirection_url: 'https://<MCP_DOMAIN>'
+
+storage:
+  encryption_key: '<RAND_STORAGE_ENCRYPTION_KEY>'   # >= 20 chars
+  local:
+    path: '/var/lib/authelia/db.sqlite3'            # named volume, survives CD git clean
+
+notifier:
+  disable_startup_check: true
+  filesystem:
+    filename: '/var/lib/authelia/notification.txt'
+
+identity_validation:
+  reset_password:
+    jwt_secret: '<RAND_JWT_SECRET>'
+
+identity_providers:
+  oidc:
+    hmac_secret: '<RAND_HMAC_SECRET>'
+    jwks:
+      - key: |
+          -----BEGIN PRIVATE KEY-----
+          <PASTE authelia/private.pem CONTENTS HERE>
+          -----END PRIVATE KEY-----
+    lifespans:
+      custom:
+        mcp_long_lived:
+          access_token: '8760h'    # ~1 year; MCP clients don't refresh → session = token TTL
+          id_token: '8760h'        # MUST match access_token (id_token exp gates the session)
+          refresh_token: '8760h'
+          authorize_code: '5m'
+    clients:
+      - client_id: 'ram-brain'
+        client_name: 'RAM brain'
+        client_secret: '<PBKDF2_HASH_OF_CLIENT_SECRET>'
+        public: false
+        authorization_policy: 'one_factor'
+        # FastMCP's oidc-proxy authenticates to the upstream token endpoint with
+        # HTTP Basic (client_secret_basic); must match or Authelia returns invalid_client.
+        token_endpoint_auth_method: 'client_secret_basic'
+        consent_mode: 'implicit'
+        pkce_challenge_method: 'S256'
+        require_pkce: true
+        lifespan: 'mcp_long_lived'
+        redirect_uris:
+          - 'https://<MCP_DOMAIN>/auth/callback'
+        # RFC 8707 Resource Indicators: MCP clients send `resource=https://<MCP_DOMAIN>/mcp`.
+        # Authelia rejects (invalid_target) any resource not whitelisted here.
+        audience:
+          - 'https://<MCP_DOMAIN>'
+          - 'https://<MCP_DOMAIN>/mcp'
+        scopes: ['openid', 'email', 'profile', 'offline_access']
+        grant_types: ['authorization_code', 'refresh_token']
+        response_types: ['code']

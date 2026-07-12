@@ -1,0 +1,13 @@
+# cloudflared ingress — TEMPLATE (committed). Copy to config.yml and fill real
+# hostnames + tunnel ID. The real config.yml is gitignored (keeps the domain out
+# of git, same as .env). On the CD runner it is materialized from the
+# CLOUDFLARED_CONFIG GitHub secret (see .github/workflows/deploy.yml).
+#
+# Credentials are NOT here — they come from TUNNEL_CRED_CONTENTS (.env).
+tunnel: <CF_TUNNEL_ID>
+ingress:
+  - hostname: <MCP_DOMAIN>            # the MCP server
+    service: http://markdown-vault-mcp:8000
+  - hostname: <AUTH_DOMAIN>           # Authelia (OIDC IdP)
+    service: http://authelia:9091
+  - service: http_status:404         # catch-all (required last rule)

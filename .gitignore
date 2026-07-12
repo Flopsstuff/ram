@@ -1,0 +1,47 @@
+# --- Internal notes (not for the repo) ---
+plan.md
+
+# --- Secrets / environment ---
+# NEVER commit: bearer token, git PAT, tunnel token live here
+.env
+.env.*
+!.env.example
+*.secret
+secrets/
+
+# --- Cloudflare Tunnel ---
+# Real config.yml holds the tunnel ID + real hostnames → gitignored; the
+# template (config.yml.example) is committed. Credentials stay inline in .env
+# (TUNNEL_CRED_CONTENTS). On the CD runner config.yml is materialized from the
+# CLOUDFLARED_CONFIG secret. *.pem guards any stray tunnel cert/key.
+cloudflared/*
+!cloudflared/config.yml.example
+*.pem
+
+# --- Authelia (OIDC IdP) ---
+# Real configuration.yml / users_database.yml hold secrets + real hostnames +
+# the JWKS private key → gitignored; only the .example templates are committed.
+# On the CD runner both are materialized from AUTHELIA_CONFIG / AUTHELIA_USERS.
+authelia/*
+!authelia/configuration.yml.example
+!authelia/users_database.yml.example
+
+# --- Docker compose local overrides ---
+docker-compose.override.yml
+compose.override.yml
+
+# --- Local vault / data (if ever bind-mounted instead of named volumes) ---
+vault/
+data/
+
+# --- Desktop .mcpb bundle (whole workspace + built artifact) ---
+desktop/
+*.mcpb
+
+# --- OS / editor cruft ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.idea/
+.vscode/

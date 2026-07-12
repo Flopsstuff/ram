@@ -1,0 +1,14 @@
+# Authelia users — TEMPLATE (committed). Copy to users_database.yml and fill.
+# The single user IS the allowlist (deny-by-default). The real file is gitignored;
+# on the CD runner it is materialized from the AUTHELIA_USERS GitHub secret.
+#
+# Generate the password hash:
+#   docker run --rm authelia/authelia:latest \
+#     authelia crypto hash generate argon2 --password '<PASSWORD>'
+users:
+  <username>:
+    disabled: false
+    displayname: '<Display Name>'
+    password: '<ARGON2ID_HASH>'
+    email: '<email>'
+    groups: []
