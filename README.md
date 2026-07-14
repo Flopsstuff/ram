@@ -158,6 +158,25 @@ do not reliably refresh, so the session equals the access-token lifetime.
   issued OAuth token at once (bearer unaffected); changing the Authelia user password blocks new
   logins.
 
+### Note-linking convention (wikilinks)
+
+Notes cross-link with `[[wikilinks]]`, resolved by the mcp-md engine — **not** by git. Two
+consequences agents keep tripping over:
+
+- **Link to a real vault path without the extension** — `[[projects/ram/overview]]`,
+  `[[machines/robmini]]`. A bare `[[basename]]` only resolves if a file `basename.md` sits at
+  the **vault root**; anything deeper resolves to a broken link. Never link to an agent's local
+  memory slug (`~/.claude/.../memory/*`) — those files don't exist in the vault, so the link is
+  dead on arrival. Audit with the `get_outlinks` / `get_broken_links` MCP tools (`exists:false`
+  = broken).
+- **`[[...]]` is not clickable on GitHub.** The GitHub/GitLab web UI renders it as literal text —
+  wikilink syntax is an Obsidian/mcp-md feature, not standard Markdown. The links are only
+  first-class *inside* the served vault (via the MCP tools). If you need a link that also clicks
+  in the git web UI, use a plain `[text](relative/path.md)` Markdown link instead.
+
+The server surfaces the same rule to every agent via `instructions.md`
+(`MARKDOWN_VAULT_MCP_INSTRUCTIONS`).
+
 ## Design rationale
 
 Why the deployment is shaped this way (the "why" behind the fixed decisions):
