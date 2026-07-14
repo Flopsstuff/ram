@@ -96,10 +96,13 @@ jobs:
       # `up -d` recreates a container only when its image/env/volume-definition
       # changes — NOT when a bind-mounted config FILE's contents change. cloudflared
       # and authelia read their config from bind-mounted files that we re-materialize
-      # from secrets every run, so force-recreate them to guarantee the new config is
-      # actually loaded (markdown-vault-mcp already recreates on any .env change).
-      - name: Reload config-mounted services (authelia, cloudflared)
-        run: docker compose up -d --force-recreate --no-deps authelia cloudflared
+      # from secrets every run. markdown-vault-mcp reads ./instructions.md via `cat`
+      # at container start (injected as MARKDOWN_VAULT_MCP_INSTRUCTIONS), which compose
+      # likewise can't detect as a change — so an instructions.md-only edit would never
+      # reach the running server without a new image. Force-recreate all three so the
+      # freshly written files always take effect.
+      - name: Reload config-mounted services (authelia, cloudflared, mcp)
+        run: docker compose up -d --force-recreate --no-deps authelia cloudflared markdown-vault-mcp
 
       - name: Prune dangling images
         run: docker image prune -f
