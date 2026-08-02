@@ -27,6 +27,15 @@ services:
   markdown-vault-mcp:
     image: ghcr.io/pvliesdonk/markdown-vault-mcp:latest
     restart: unless-stopped
+    # FastEmbed/onnxruntime sizes its thread pool to the core count, so the
+    # boot-time reindex pins ALL cores (~800% on the 8-core host) for as long as
+    # it takes to re-embed whatever changed since the last boot — right when the
+    # other 30+ containers on that host are starting too. Capped at 2 cores, with
+    # a low share so it yields under contention. The embed job is background:
+    # the server accepts requests ~6s after start regardless, so a slower
+    # catch-up costs nothing visible.
+    cpus: "2.0"
+    cpu_shares: 256
     # The app only reads instructions from MARKDOWN_VAULT_MCP_INSTRUCTIONS (env), so
     # inject the editable ./instructions.md into it before exec'ing the server.
     # ($$ becomes $ after compose interpolation → the shell runs $(cat ...).)
