@@ -43,18 +43,23 @@ plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Aut
 
 ## Architecture
 
-Four services in `docker-compose.yml` (compose project `ram-brain`):
+Three services in `docker-compose.yml` (compose project `ram-brain`):
 
-- **`init-perms`** — one-shot alpine that `chown -R 1000:1000 /vault /data`, then exits.
-  Non-obvious and load-bearing: named volumes mount root-owned, the app image runs as
-  UID 1000 (`appuser`), and its entrypoint fixes only `/data`, never `/vault`. Without
-  this, the managed `git clone` into `/vault` dies with "Permission denied". The MCP
-  service `depends_on` it with `condition: service_completed_successfully`.
 - **`markdown-vault-mcp`** — the server (`serve --transport http --host 0.0.0.0 --port 8000`).
   Deliberately **no `ports:`** — the only ingress is through cloudflared. Two volumes:
   `vault-data → /vault` (git-managed clone, initially empty) and `app-data → /data`
   (FTS index + embeddings + HTTP session KV). Keeping `/data` out of `/vault` is
-  mandatory so index/state never get committed to the repo.
+  mandatory so index/state never get committed to the repo. Two non-obvious knobs:
+  - **`entrypoint:` is overridden** to `chown` a still-root-owned `/vault` before handing
+    over to the image's own `/usr/local/bin/docker-entrypoint.sh`. Load-bearing: named
+    volumes mount root-owned and the stock entrypoint fixes only `/data`, so a fresh
+    `vault-data` volume would kill the managed clone with "Permission denied". It runs as
+    root because the image sets no `USER` — the stock entrypoint drops to `appuser` via
+    `gosu` itself. (This replaced a separate one-shot `init-perms` service, which left an
+    `Exited` container in every listing.)
+  - **`cpus: "2.0"` + `cpu_shares: 256`.** FastEmbed/onnxruntime sizes its thread pool to
+    the core count, so the boot reindex used to pin all 8 cores of the host for as long as
+    the re-embed took — see "Boot-time reindex" below for *why* it re-embeds at all.
 - **`cloudflared`** — the tunnel. Credentials are still env-driven (`command: tunnel run
   ${CF_TUNNEL_ID}` + `TUNNEL_CRED_CONTENTS` inlined), but ingress is now a **mounted
   `cloudflared/config.yml`** (`--config /etc/cloudflared/config.yml`, `:ro`), because two
@@ -70,6 +75,18 @@ Four services in `docker-compose.yml` (compose project `ram-brain`):
   runner's `git clean` can't wipe it. The single user in `users_database.yml` **is** the
   allowlist (deny-by-default). Token lifespans are ~1 year (`mcp_long_lived` profile;
   `id_token` must match `access_token`) because MCP clients don't reliably refresh.
+
+**Boot-time reindex — why a restart can burn minutes of CPU.** The server decides what changed
+by diffing the vault against `/data/state.json`, a path→SHA-256 snapshot. That snapshot is
+rewritten **only** by a full `build_index` / `reindex` pass (`tracker.update_state`), and a
+normal MCP `write` does not do that: the note lands on disk, in the FTS index, in the vector
+index and in git, but never in `state.json`. So the boot reconciliation sees every note written
+through the server since the last reindex as `added`, re-indexes it and **re-embeds it a second
+time**. The startup CPU spike is therefore proportional to how many notes were written since the
+last start — not to vault size, and not to how the container was started (verified: a restart
+after a day of writes reported `57 added` and pinned every core for ~70 s; a redeploy minutes
+later, with no writes in between, reported `0 added` and did nothing). Upstream issue, not a
+config error; the `cpus` cap is the local mitigation.
 
 Data flow: `agents ─HTTPS→ Cloudflare edge → cloudflared →` either `markdown-vault-mcp →
 /vault (git) + /data` (MCP traffic) or `→ authelia` (the browser leg of the OAuth flow).

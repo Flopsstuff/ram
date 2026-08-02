@@ -10,20 +10,6 @@
 name: ram-brain
 
 services:
-  # One-shot: named volumes arrive root-owned, but the app runs as UID 1000
-  # (appuser) and the image entrypoint only fixes /data, never /vault. Without
-  # this, `git clone` into /vault fails with "Permission denied". Runs to
-  # completion before the server starts; cheap no-op on subsequent boots.
-  init-perms:
-    image: alpine:3
-    # chown is silent on success; the echoes make the log show it actually ran.
-    command: ["sh", "-c", "echo 'init-perms: fixing ownership of /vault and /data'; chown -R 1000:1000 /vault /data; echo 'init-perms: done (owner 1000:1000)'"]
-    volumes:
-      - vault-data:/vault
-      - app-data:/data
-    network_mode: none   # chown needs no network; also avoids creating a stray default net
-    restart: "no"
-
   markdown-vault-mcp:
     image: ghcr.io/pvliesdonk/markdown-vault-mcp:latest
     restart: unless-stopped
@@ -36,6 +22,24 @@ services:
     # catch-up costs nothing visible.
     cpus: "2.0"
     cpu_shares: 256
+    # Named volumes arrive root-owned, and the image's own entrypoint fixes only
+    # /data, never /vault — so a fresh vault-data volume would make the managed
+    # `git clone` die with "Permission denied". This wrapper runs FIRST, as root
+    # (the image sets no USER; it drops to appuser itself via gosu at the end of
+    # docker-entrypoint.sh), chowns /vault only when it is still root-owned, then
+    # hands over to the stock entrypoint unchanged. Used to be a separate
+    # one-shot `init-perms` service, which left an Exited container lying around
+    # in every container list. UID/GID mirror the entrypoint's own PUID/PGID
+    # defaults, so `user:`-less installs stay consistent.
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ "$$(stat -c %u /vault)" = 0 ]; then
+          chown -R "$${PUID:-1000}:$${PGID:-1000}" /vault
+        fi
+        exec /usr/local/bin/docker-entrypoint.sh "$$@"
+      - --
     # The app only reads instructions from MARKDOWN_VAULT_MCP_INSTRUCTIONS (env), so
     # inject the editable ./instructions.md into it before exec'ing the server.
     # ($$ becomes $ after compose interpolation → the shell runs $(cat ...).)
@@ -49,9 +53,6 @@ services:
       - vault-data:/vault                              # git-managed vault clone (persistent)
       - app-data:/data                                 # FTS index + embeddings + session state (NOT in git)
       - ./instructions.md:/etc/ram/instructions.md:ro  # editable server instructions
-    depends_on:
-      init-perms:
-        condition: service_completed_successfully
     networks:
       - brain
     # NOTE: intentionally no `ports:` — reachable only through cloudflared.

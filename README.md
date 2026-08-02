@@ -23,7 +23,7 @@ agents ─HTTPS─► Cloudflare edge ─► cloudflared ─┬─► markdown-v
 
 | File | Purpose | In git? |
 | --- | --- | --- |
-| `docker-compose.yml` | services: `init-perms`, `markdown-vault-mcp`, `cloudflared`, `authelia` | ✅ |
+| `docker-compose.yml` | services: `markdown-vault-mcp`, `cloudflared`, `authelia` | ✅ |
 | `.env.example` / `.env` | env template / **real secrets** (bearer, OIDC, git PAT, tunnel) | ✅ / 🚫 |
 | `cloudflared/config.yml.example` / `.yml` | tunnel ingress template / **real** (tunnel ID + hostnames) | ✅ / 🚫 |
 | `authelia/configuration.yml.example` / `.yml` | Authelia+OIDC template / **real** (secrets, JWKS, client) | ✅ / 🚫 |
@@ -206,10 +206,13 @@ Why the deployment is shaped this way (the "why" behind the fixed decisions):
   belong to the account that **owns** the vault repo, scoped to *Contents: Read and write*.
 - **`/data` is separate from `/vault`.** The FTS index, embeddings, and HTTP session state live
   in `/data` deliberately, so they never get committed into the vault git repo.
-- **`init-perms` one-shot is load-bearing.** Named volumes mount root-owned; the app runs as
-  UID 1000 and its entrypoint fixes only `/data`, never `/vault`. Without a one-shot
-  `chown -R 1000:1000 /vault /data`, the managed clone into `/vault` dies with "Permission denied".
-  (Authelia runs as root, so its named volume needs no such fix.)
+- **The overridden `entrypoint:` on `markdown-vault-mcp` is load-bearing.** Named volumes mount
+  root-owned; the image's own entrypoint fixes only `/data`, never `/vault`, so a fresh
+  `vault-data` volume makes the managed clone die with "Permission denied". The wrapper runs as
+  root (the image sets no `USER` — it drops to `appuser` via `gosu` itself), `chown`s `/vault`
+  only while it is still root-owned, then `exec`s the stock entrypoint untouched. This used to be
+  a separate one-shot `init-perms` service; it was folded in so no `Exited` container is left
+  behind. (Authelia runs as root, so its named volume needs no such fix.)
 - **Cloudflare Tunnel ingress, no published ports, never Cloudflare Access.** TLS terminates at
   the edge; inside the network it's plain HTTP. Auth is the MCP server's (bearer or its own OIDC
   proxy) — **not** Cloudflare Access, on either hostname. Access injects its own auth and breaks
