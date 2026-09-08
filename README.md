@@ -233,3 +233,7 @@ Why the deployment is shaped this way (the "why" behind the fixed decisions):
 - **SSH remotes / deploy keys** — no SSH auth path; HTTPS + PAT only.
 - **GitHub push webhook** for instant pickup of external pushes — the frequent periodic pull
   covers it.
+
+## License
+
+Copyright 2026 Flopsstuff. Licensed under the [Apache License 2.0](LICENSE).
