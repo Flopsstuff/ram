@@ -41,9 +41,33 @@ permissions:
 jobs:
   deploy:
     runs-on: [self-hosted]
+    # A pull that hangs has to fail rather than hold `ram-deploy` silently.
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      # Docker Desktop's `desktop` credential store is tied to the logged-in GUI
+      # session. Invoked from the runner's launchd session its helper blocks in
+      # open(2) and never returns, so `docker compose pull` hangs forever. All
+      # images here are public, so the job runs against a copy of the config
+      # with no credential store in it.
+      - name: Point docker at a credential-store-free config
+        run: |
+          src="${DOCKER_CONFIG:-$HOME/.docker}"
+          dst="$RUNNER_TEMP/docker-config"
+          # Read the active context before the switch: the copy below carries the
+          # context definitions, not the record of which one is current.
+          context="$(docker context show)"
+          rm -rf "$dst"
+          mkdir -p "$dst"
+          # `docker compose` is a user-scoped plugin on this host, so the new
+          # config dir has to reach the same plugin and context directories.
+          for dir in contexts cli-plugins; do
+            if [ -d "$src/$dir" ]; then ln -s "$src/$dir" "$dst/$dir"; fi
+          done
+          printf '{"currentContext":"%s"}\n' "$context" > "$dst/config.json"
+          echo "DOCKER_CONFIG=$dst" >> "$GITHUB_ENV"
 
       # Written AFTER checkout on purpose: checkout's `git clean` wipes untracked
       # files (incl. a leftover .env from a previous run), so we always rewrite it.
