@@ -123,10 +123,11 @@ jobs:
       # from secrets every run. markdown-vault-mcp imports ./patches/sitecustomize.py
       # (bind-mounted) at interpreter start, which compose likewise can't detect as a
       # change — so a patch-only edit would never reach the running server without a
-      # new image. Force-recreate all three so the freshly written files always take
-      # effect.
-      - name: Reload config-mounted services (authelia, cloudflared, mcp)
-        run: docker compose up -d --force-recreate --no-deps authelia cloudflared markdown-vault-mcp
+      # new image. The wiki's Caddyfile (wiki-proxy) and sync script (wiki-sync) are
+      # bind-mounted the same way. Force-recreate all of them so the freshly written
+      # files always take effect.
+      - name: Reload config-mounted services (authelia, cloudflared, mcp, wiki)
+        run: docker compose up -d --force-recreate --no-deps authelia cloudflared markdown-vault-mcp wiki-proxy wiki-sync
 
       - name: Prune dangling images
         run: docker image prune -f

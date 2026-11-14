@@ -6,15 +6,20 @@ owns a git-backed markdown vault (auto-commit / push / periodic pull), is expose
 public internet through a **Cloudflare Tunnel**, and accepts **two auth paths at once
 (multi-auth): a static bearer token for headless agents, and OAuth 2.1 (OIDC) via a
 self-hosted [Authelia](https://www.authelia.com/) for interactive GUI clients.**
+A browser **wiki** ([SilverBullet](https://silverbullet.md/)) on its own clone of the vault lets
+you read and edit the notes directly, behind the same Authelia login.
 
 ```
 agents ─HTTPS─► Cloudflare edge ─► cloudflared ─┬─► markdown-vault-mcp ─► /vault (git: your-org/vault)
   │  (bearer OR OAuth)                           │        └────────────► /data (index, embeddings, sessions)
-  └─ OAuth login ───────────────────────────────┴─► authelia  (OIDC IdP @ <AUTH_DOMAIN>)
+  └─ OAuth login ───────────────────────────────┼─► authelia  (OIDC IdP @ <AUTH_DOMAIN>)
+wiki users (browser) ───────────────────────────┴─► wiki-proxy ─(forward-auth: authelia)─► wiki
+                                                    wiki ◄─ wiki-data (own clone) ◄─► wiki-sync ◄─► vault repo
 ```
 
 - **Domain:** `https://<MCP_DOMAIN>/mcp` — the MCP endpoint
-- **IdP domain:** `https://<AUTH_DOMAIN>` — Authelia login (used only during the OAuth flow)
+- **IdP domain:** `https://<AUTH_DOMAIN>` — Authelia login (OAuth flow and the wiki)
+- **Wiki domain:** `https://<WIKI_DOMAIN>` — the vault in a browser, read and edit
 - **Vault repo:** `https://github.com/your-org/vault.git` (private, managed read-write)
 - **Auth:** multi-auth — static bearer (`Authorization: Bearer <token>`) **or** OAuth 2.1 (DCR + PKCE)
 - **Transport:** streamable HTTP · **Embeddings:** `gemini-embedding-2` through Google AI Studio's
@@ -25,12 +30,13 @@ agents ─HTTPS─► Cloudflare edge ─► cloudflared ─┬─► markdown-v
 
 | File | Purpose | In git? |
 | --- | --- | --- |
-| `docker-compose.yml` | services: `markdown-vault-mcp`, `cloudflared`, `authelia` | ✅ |
+| `docker-compose.yml` | services: `markdown-vault-mcp`, `cloudflared`, `authelia`, `wiki`, `wiki-sync`, `wiki-proxy` | ✅ |
 | `.env.example` / `.env` | env template / **real secrets** (bearer, OIDC, git PAT, tunnel) | ✅ / 🚫 |
 | `cloudflared/config.yml.example` / `.yml` | tunnel ingress template / **real** (tunnel ID + hostnames) | ✅ / 🚫 |
 | `authelia/configuration.yml.example` / `.yml` | Authelia+OIDC template / **real** (secrets, JWKS, client) | ✅ / 🚫 |
 | `authelia/users_database.yml.example` / `.yml` | allowlist template / **real** (user + password hash) | ✅ / 🚫 |
 | `patches/sitecustomize.py` | startup patch: fills the embedding `index` Gemini omits (until the upstream fix ships) | ✅ |
+| `wiki/` | `sync.sh` (git sync of the wiki's clone) and `Caddyfile` (Authelia forward-auth in front of the wiki) | ✅ |
 | `bench/` | embedding-model comparison harness; real corpus, queries and keys stay in gitignored `bench/.data/` and `bench/.env` | ✅ (code only) |
 
 cloudflared routes two hostnames through one tunnel via `cloudflared/config.yml` ingress
@@ -151,9 +157,14 @@ do not reliably refresh, so the session equals the access-token lifetime.
 
 ## Operating notes
 
-- **One writer is safest.** Prefer editing the vault *through the server*. If you also push to
-  the vault repo directly (web editor, laptop clone) while the server has un-pushed commits, the
-  ff-only pull will refuse to merge (histories diverge) — reconcile manually.
+- **Edit through the server, the wiki or a git push — never in the server's `/vault`.** The
+  server pulls on `GIT_PULL_INTERVAL_S` with a rebase: its own un-pushed commits are replayed on
+  top of what it fetched, and on a conflicting file it keeps the remote version and saves its
+  own as a separate conflict file. After every pull it reindexes the changed notes itself, so a
+  pushed edit is searchable within one pull interval, no manual `reindex`. A GitHub push webhook
+  (`POST /github-webhook`, `MARKDOWN_VAULT_MCP_GITHUB_WEBHOOK_SECRET`) would make pushes land at
+  once; it is not enabled. Writing straight into the server's working tree is the one thing that
+  breaks: uncommitted files block its rebase and never reach the index.
 - **Concurrent agents:** namespace by folder (`agents/<id>/…`, `shared/…`); in `shared/` prefer
   append over rewriting another agent's lines; add `## [agent-id]` attribution headers.
 - **Rotating credentials:** rotating `BEARER_TOKEN` logs out bearer agents; rotating `GIT_TOKEN`
@@ -161,6 +172,24 @@ do not reliably refresh, so the session equals the access-token lifetime.
   `MARKDOWN_VAULT_MCP_OIDC_JWT_SIGNING_KEY` is the **OAuth kill switch** — it invalidates every
   issued OAuth token at once (bearer unaffected); changing the Authelia user password blocks new
   logins.
+
+### Wiki (browser)
+
+`https://<WIKI_DOMAIN>` serves [SilverBullet](https://silverbullet.md/) on the vault. Three
+services:
+
+- **`wiki-sync`** (`wiki/sync.sh`) clones the vault into its own `wiki-data` volume on first
+  start, then works on the MCP server's own git settings from `.env`: it commits and pushes
+  `GIT_PUSH_DELAY_S` after the last edit (debounced, one commit per pause), and pulls every
+  `GIT_PULL_INTERVAL_S`. Local commits are rebased with `-X theirs`, so on a conflicting hunk
+  the browser edit wins; a rebase that still stops is aborted and retried next round. Commits
+  carry `<GIT_COMMIT_NAME> (wiki)` as the author.
+- **`wiki`** is SilverBullet on that clone. Its own files (`CONFIG.md`, `Library/`, `_plug/`)
+  are listed in the clone's `.git/info/exclude`, which is never committed, so they stay out of
+  the vault and the agents' search.
+- **`wiki-proxy`** (Caddy, `wiki/Caddyfile`) asks Authelia's forward-auth endpoint about every
+  request. Without a session you land on the Authelia portal; Authelia's cookie is set on the
+  parent domain, so one login covers it. SilverBullet itself has no auth and no published port.
 
 ### Note-linking convention (wikilinks)
 
@@ -225,9 +254,13 @@ Why the deployment is shaped this way (the "why" behind the fixed decisions):
   both the bearer header (headless) and the OAuth flow (GUI).
 - **Transport is streamable HTTP, not SSE.** Cloudflare Tunnel proxies streamable-HTTP cleanly;
   SSE can hit buffering/timeout issues.
-- **Frequent fast-forward-only pull, no push webhook.** The server pulls `fetch` + ff-only on an
-  interval, enough to pick up the operator's own edits; the trade-off is the two-writer caveat
-  under **Operating notes**.
+- **Periodic rebase pull, no push webhook.** The server pulls on an interval, rebasing its own
+  un-pushed commits and reindexing whatever the pull changed, which is enough to pick up the
+  wiki's and the operator's pushes within minutes. See **Operating notes** for the conflict rule.
+- **The wiki gets its own clone, not a share of `/vault`.** A second writer in the server's
+  working tree would leave uncommitted files that block its rebase and bypass its index. Going
+  through git keeps the server the only writer of its tree, and both sides already resolve
+  conflicts on pull.
 
 ### Considered and dropped
 
@@ -237,8 +270,8 @@ Why the deployment is shaped this way (the "why" behind the fixed decisions):
 - **Multiple vaults / per-agent namespaces / per-agent branches** — the server is single-tenant
   (one instance = one vault = one branch).
 - **SSH remotes / deploy keys** — no SSH auth path; HTTPS + PAT only.
-- **GitHub push webhook** for instant pickup of external pushes — the frequent periodic pull
-  covers it.
+- **GitHub push webhook** for instant pickup of external pushes — the periodic pull covers it
+  for now; it is the first thing to enable if the wiki-to-agents delay starts to matter.
 
 ## License
 

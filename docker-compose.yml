@@ -4,6 +4,9 @@
 #
 #   markdown-vault-mcp : the MCP server (managed git, FastEmbed, HTTP transport)
 #   cloudflared        : Cloudflare Tunnel (Method B, locally-managed config)
+#   authelia           : OIDC provider for MCP OAuth + forward-auth for the wiki
+#   wiki, wiki-sync,
+#   wiki-proxy         : SilverBullet in the browser on its own vault clone
 #
 # No container publishes ports to the host. The ONLY ingress is via cloudflared.
 
@@ -64,9 +67,10 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    # Two public hostnames now share this one tunnel, so a single TUNNEL_URL
+    # Three public hostnames share this one tunnel, so a single TUNNEL_URL
     # origin no longer suffices — routing is done by ingress rules in
-    # ./cloudflared/config.yml (ram.* → mcp, auth.* → authelia). Credentials
+    # ./cloudflared/config.yml (ram.* → mcp, auth.* → authelia,
+    # wiki.* → wiki-proxy). Credentials
     # still come from the environment; only ingress moved into a file.
     #   CF_TUNNEL_ID          which tunnel to run (.env), passed to `run <ID>`
     #   TUNNEL_CRED_CONTENTS  tunnel credentials JSON, inline (.env)
@@ -80,6 +84,7 @@ services:
     depends_on:
       - markdown-vault-mcp
       - authelia
+      - wiki-proxy
     networks:
       - brain
 
@@ -98,6 +103,67 @@ services:
       - brain
     # NOTE: intentionally no `ports:` — reachable only through cloudflared.
 
+  # --- Wiki: browse and edit the vault in a browser at <WIKI_DOMAIN> ---
+  # cloudflared → wiki-proxy (Authelia forward-auth) → wiki (SilverBullet).
+  # The wiki works on its OWN clone of the vault (wiki-data), never on the MCP
+  # server's /vault: a second writer in that working tree would block the
+  # server's rebase and bypass its index. wiki-sync commits browser edits and
+  # pushes them to the vault repo; the MCP server picks them up on its next
+  # pull and reindexes them itself.
+
+  # Git side of the wiki: clones the vault into wiki-data on first start, then
+  # commits + pushes edits and pulls agents' changes, on the MCP server's own
+  # GIT_PUSH_DELAY_S / GIT_PULL_INTERVAL_S (see wiki/sync.sh).
+  wiki-sync:
+    image: alpine/git:latest
+    restart: unless-stopped
+    entrypoint: ["sh", "/etc/wiki/sync.sh"]
+    env_file:
+      - .env
+    volumes:
+      - wiki-data:/data
+      - ./wiki/sync.sh:/etc/wiki/sync.sh:ro
+    # SilverBullet must not start on an empty folder (it would set up a fresh
+    # space there and the clone would refuse the non-empty directory).
+    healthcheck:
+      test: ["CMD", "test", "-d", "/data/.git"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    networks:
+      - brain
+
+  # SilverBullet: the browser editor. No auth of its own: it is reachable only
+  # through wiki-proxy, which lets in nobody without an Authelia session.
+  wiki:
+    image: ghcr.io/silverbulletmd/silverbullet:latest-slim
+    restart: unless-stopped
+    environment:
+      SB_INDEX_PAGE: README     # the vault has no index.md; open its README
+    volumes:
+      - wiki-data:/data
+    depends_on:
+      wiki-sync:
+        condition: service_healthy
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:` — reachable only through wiki-proxy.
+
+  # Caddy in front of the wiki: asks Authelia about every request
+  # (forward-auth) and proxies the allowed ones to SilverBullet. See
+  # wiki/Caddyfile.
+  wiki-proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    volumes:
+      - ./wiki/Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - wiki
+      - authelia
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+
 networks:
   brain:
     driver: bridge
@@ -106,3 +172,4 @@ volumes:
   vault-data:
   app-data:
   authelia-data:   # Authelia SQLite + notifications (must persist across CD git clean)
+  wiki-data:       # the wiki's own clone of the vault (SilverBullet + wiki-sync)

@@ -43,7 +43,8 @@ plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Aut
 
 ## Architecture
 
-Three services in `docker-compose.yml` (compose project `ram-brain`):
+Six services in `docker-compose.yml` (compose project `ram-brain`): the MCP stack (the first
+three) and the browser wiki (the last three).
 
 - **`markdown-vault-mcp`** — the server (`serve --transport http --host 0.0.0.0 --port 8000`).
   Deliberately **no `ports:`** — the only ingress is through cloudflared. Two volumes:
@@ -84,6 +85,31 @@ Three services in `docker-compose.yml` (compose project `ram-brain`):
   runner's `git clean` can't wipe it. The single user in `users_database.yml` **is** the
   allowlist (deny-by-default). Token lifespans are ~1 year (`mcp_long_lived` profile;
   `id_token` must match `access_token`) because MCP clients don't reliably refresh.
+  Authelia also serves **forward-auth** (`/api/authz/forward-auth`) for the wiki; its
+  `access_control.default_policy: one_factor` is what lets the logged-in user through there.
+- **`wiki-sync`** — `alpine/git` running `wiki/sync.sh` (mounted `:ro`). Clones the vault into
+  the **`wiki-data`** volume on first start, then commits + pushes browser edits and pulls
+  agents' changes on the MCP server's own `GIT_PUSH_DELAY_S` / `GIT_PULL_INTERVAL_S` and git
+  credentials from `.env`. Non-obvious knobs:
+  - **Rebase with `-X theirs`**: in a rebase "theirs" is the local commit being replayed, so the
+    browser edit wins a conflicting hunk. A rebase that still stops is aborted and retried; the
+    commits stay local until it goes through.
+  - **`.git/info/exclude`** lists SilverBullet's own files (`CONFIG.md`, `Library/`, `_plug/`,
+    `.silverbullet*`). It is local to the clone and never committed, so those files never reach
+    the vault repo or the agents' index. `sync.sh` rewrites it on every start.
+  - The token never touches disk: the credential helper in `.git/config` reads it from env.
+  - Its healthcheck (`/data/.git` exists) gates `wiki`: SilverBullet on an empty folder would
+    set up a fresh space there and the clone would then refuse the non-empty directory.
+- **`wiki`** — SilverBullet (`latest-slim`, no Chromium) on `wiki-data`. **No auth of its own
+  and no `ports:`**: the only way in is `wiki-proxy`. `SB_INDEX_PAGE=README` because the vault
+  has no `index.md`. Runs as root (owner of the fresh volume), same as `wiki-sync`, so files
+  from either side stay writable by both.
+- **`wiki-proxy`** — Caddy with `wiki/Caddyfile` (mounted `:ro`): `forward_auth` to
+  `authelia:9091` on every request, then `reverse_proxy wiki:3000`. Sets
+  `X-Forwarded-Proto: https` on the auth subrequest because TLS ends at Cloudflare and Authelia
+  needs the public scheme to match the cookie domain and build the redirect. Cloudflared routes
+  `<WIKI_DOMAIN>` here; the Authelia session cookie is on the parent domain, so one login covers
+  the portal and the wiki.
 
 **Boot-time reindex — why a restart can burn minutes of CPU.** The server decides what changed
 by diffing the vault against `/data/state.json`, a path→SHA-256 snapshot. That snapshot is
@@ -98,7 +124,9 @@ later, with no writes in between, reported `0 added` and did nothing). Upstream 
 config error; the `cpus` cap is the local mitigation.
 
 Data flow: `agents ─HTTPS→ Cloudflare edge → cloudflared →` either `markdown-vault-mcp →
-/vault (git) + /data` (MCP traffic) or `→ authelia` (the browser leg of the OAuth flow).
+/vault (git) + /data` (MCP traffic) or `→ authelia` (the browser leg of the OAuth flow). The
+wiki: `browser → cloudflared → wiki-proxy → (authelia forward-auth) → wiki → wiki-data`, with
+`wiki-sync` moving its edits through the vault repo to the server's next pull.
 TLS terminates at the edge; inside the network it's plain HTTP. **Auth is enforced by the
 MCP server — bearer token OR its own OIDC proxy (which delegates login to Authelia) — not by
 Cloudflare Access.**
@@ -158,7 +186,9 @@ for the runner (it reads the secret, not git).
   CD's `git clean` wipes the bind-mounted config dir on every deploy.
 - **Config-mounted services must be force-recreated to reload.** `docker compose up -d` does NOT
   recreate a container when only a bind-mounted config FILE's contents change, so `deploy.yml`
-  force-recreates `authelia` + `cloudflared` after re-materializing their configs. A plain
+  force-recreates `authelia` + `cloudflared` after re-materializing their configs, and
+  `markdown-vault-mcp`, `wiki-proxy` + `wiki-sync` for their bind-mounted patch, Caddyfile and
+  sync script. A plain
   `up -d` (or editing the file on the host) silently keeps the stale in-memory config.
 - **OIDC client (`ram-brain`) must satisfy the MCP OAuth flow, or login half-works then fails:**
   its `audience` whitelist must include the MCP resource (`https://<MCP_DOMAIN>` and
@@ -182,11 +212,22 @@ for the runner (it reads the secret, not git).
 
 ## Two-writer / concurrency model (know before touching sync)
 
-One shared server identity — every client, whether it authenticates with the bearer token or
-via OAuth, maps to the **same** single git identity for all agents. The server serializes commits
-and pulls **fetch + fast-forward-only**. If the operator pushes to `<owner>/<vault-repo>` from anywhere
-else (web editor, laptop clone) while the server holds un-pushed commits, histories diverge
-and the ff-only pull refuses to merge — manual reconciliation required. Safest rule: edit
-the vault **through the server**. Agents avoid lost updates by folder convention only
+Two writers, each on its **own clone**, meeting only in `<owner>/<vault-repo>`:
+
+- **The MCP server** (`/vault`). Every client, bearer or OAuth, maps to the **same** single git
+  identity. It serializes its commits, pushes `GIT_PUSH_DELAY_S` after the last write, and pulls
+  every `GIT_PULL_INTERVAL_S` **with a rebase**: its un-pushed commits are replayed on top of the
+  remote; on a conflicting file it keeps the remote version and saves its own as a separate
+  conflict file. After every pull tick it reindexes whatever changed
+  (`vault.py` `_reconcile_on_tick` → `reconcile_index_with_head`), so pushed edits become
+  searchable within one interval with no manual `reindex`.
+- **`wiki-sync`** (`wiki-data`), on the same timings, author `<GIT_COMMIT_NAME> (wiki)`, rebasing
+  with `-X theirs` so the browser edit wins a conflicting hunk.
+
+A push from anywhere else (laptop clone, GitHub web editor) is handled the same way as the
+wiki's. **Nothing may write into the server's `/vault` working tree directly**: uncommitted
+files there block its rebase and never reach the index. A GitHub push webhook
+(`/github-webhook`, `MARKDOWN_VAULT_MCP_GITHUB_WEBHOOK_SECRET`) would make pushes reach the
+server at once; it is not enabled. Agents avoid lost updates by folder convention only
 (`agents/<id>/…` private, `shared/…` append-preferred with `## [agent-id]` attribution) —
-the server enforces none of this.
+neither writer enforces this.

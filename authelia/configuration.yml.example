@@ -25,7 +25,7 @@ authentication_backend:
       algorithm: 'argon2'
 
 access_control:
-  default_policy: 'one_factor'   # forward-auth unused; single-user DB is the allowlist
+  default_policy: 'one_factor'   # wiki forward-auth + OIDC; single-user DB is the allowlist
 
 session:
   name: 'authelia_session'
