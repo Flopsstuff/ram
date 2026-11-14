@@ -70,52 +70,6 @@ if [ -d /etc/wiki/space ]; then
   log "wiki settings copied in"
 fi
 
-# The OKF spec as a vault note, so MCP-only agents can read it with `read`.
-# Fetched from OKF_SPEC_URL (pin it to a commit) on every start and committed
-# only when the text changed; a hand edit in the vault is overwritten on the
-# next start. A failed download keeps the current copy.
-sync_okf_spec() {
-  [ -n "${OKF_SPEC_URL:-}" ] || return 0
-  spec="${OKF_SPEC_PATH:-reference/okf-spec.md}"
-  body=$(mktemp)
-  if ! wget -qO "$body" "$OKF_SPEC_URL"; then
-    log "could not fetch the OKF spec from $OKF_SPEC_URL; keeping the current copy"
-    rm -f "$body"
-    return 0
-  fi
-  today=$(date -u +%Y-%m-%d)
-  created=$today
-  if [ -f "$spec" ]; then
-    # Same text as last time: nothing to do (frontmatter is ours, skip it).
-    if awk 'f; /^---$/ && ++n == 2 { f = 1 }' "$spec" | cmp -s - "$body"; then
-      rm -f "$body"
-      return 0
-    fi
-    created=$(sed -n "s/^created: '\(.*\)'$/\1/p" "$spec" | head -1)
-    [ -n "$created" ] || created=$today
-  fi
-  mkdir -p "$(dirname "$spec")"
-  {
-    echo '---'
-    echo 'title: Open Knowledge Format (OKF)'
-    echo 'type: Reference'
-    echo 'description: Спецификация OKF, по которой оформлен этот vault. Копия ведётся автоматически (wiki-sync), руками не править.'
-    echo "created: '$created'"
-    echo "updated: '$today'"
-    echo 'tags:'
-    echo '- okf'
-    echo '- vault'
-    echo "source: $OKF_SPEC_URL"
-    echo 'license: Apache-2.0'
-    echo '---'
-    cat "$body"
-  } > "$spec"
-  rm -f "$body"
-  git add -- "$spec" && git commit -q -m "okf: sync the spec from $OKF_SPEC_URL" -- "$spec" \
-    && log "OKF spec updated in $spec"
-}
-sync_okf_spec
-
 # Rebase local commits onto the remote, then push. Returns non-zero, with the
 # rebase aborted, when either step fails; the caller retries later.
 sync_remote() {
