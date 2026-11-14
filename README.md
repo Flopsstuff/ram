@@ -168,7 +168,7 @@ Notes cross-link with `[[wikilinks]]`, resolved by the mcp-md engine — **not**
 consequences agents keep tripping over:
 
 - **Link to a real vault path without the extension** — `[[projects/ram/overview]]`,
-  `[[machines/robmini]]`. A bare `[[basename]]` only resolves if a file `basename.md` sits at
+  `[[machines/<host>]]`. A bare `[[basename]]` only resolves if a file `basename.md` sits at
   the **vault root**; anything deeper resolves to a broken link. Never link to an agent's local
   memory slug (`~/.claude/.../memory/*`) — those files don't exist in the vault, so the link is
   dead on arrival. Audit with the `get_outlinks` / `get_broken_links` MCP tools (`exists:false`
