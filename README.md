@@ -17,7 +17,8 @@ agents ─HTTPS─► Cloudflare edge ─► cloudflared ─┬─► markdown-v
 - **IdP domain:** `https://<AUTH_DOMAIN>` — Authelia login (used only during the OAuth flow)
 - **Vault repo:** `https://github.com/your-org/vault.git` (private, managed read-write)
 - **Auth:** multi-auth — static bearer (`Authorization: Bearer <token>`) **or** OAuth 2.1 (DCR + PKCE)
-- **Transport:** streamable HTTP · **Embeddings:** local FastEmbed
+- **Transport:** streamable HTTP · **Embeddings:** local FastEmbed, multilingual
+  (`paraphrase-multilingual-mpnet-base-v2`; weights cached on the `fastembed-cache` volume)
 
 ## Files
 
