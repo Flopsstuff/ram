@@ -101,13 +101,11 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 - **This repo is public**, so nothing vault-specific lives in it: no note names, folders or
   instruction text.
 
-## First-time setup
+## Install
 
-The full step-by-step recipe, from an empty GitHub account to agents connected, is in
-**[INSTALL.md](INSTALL.md)**: repos and tokens, `.env`, Authelia secrets, the tunnel, the
-runner, GitHub secrets, first deploy, checks, and running one instance for several people.
+Step by step, from an empty GitHub account to connected agents: **[INSTALL.md](INSTALL.md)**.
 
-### Deploying via CI (self-hosted runner)
+## Deploying (CI on a self-hosted runner)
 
 `.github/workflows/deploy.yml` deploys on every push to `main` (put `[skip ci]` in the
 commit message to skip). It also runs a weekly image refresh. `actions/checkout` runs
