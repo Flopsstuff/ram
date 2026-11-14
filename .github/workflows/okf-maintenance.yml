@@ -1,0 +1,42 @@
+# Nightly OKF upkeep of the vault: wikilinks from the wiki → markdown links,
+# extensionless links fixed, every folder's index.md regenerated, then an audit.
+# See scripts/okf_maintenance.py for the steps.
+#
+# No checkout on purpose: actions/checkout runs `git clean`, which would wipe
+# the gitignored .env and config files that the running containers bind-mount
+# from this same workspace. The job uses the workspace as the last deploy left
+# it, so it runs the script version that was deployed with the server.
+
+name: okf-maintenance
+
+on:
+  schedule:
+    # 02:30 UTC = 03:30 Warsaw in winter (CET), 04:30 in summer (CEST).
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+
+# Same queue as deploy.yml: never runs while the server is being recreated.
+concurrency:
+  group: ram-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  okf:
+    runs-on: [self-hosted]
+    timeout-minutes: 15
+    steps:
+      - name: Run the OKF maintenance script inside the server container
+        run: |
+          set -o pipefail
+          test -f scripts/okf_maintenance.py || { echo "::error::no deployed checkout in $PWD"; exit 1; }
+          # Plain `docker exec` by compose labels: no compose plugin and no registry
+          # credentials involved (see the DOCKER_CONFIG note in deploy.yml).
+          cid=$(docker ps -q \
+            --filter label=com.docker.compose.project=ram-brain \
+            --filter label=com.docker.compose.service=markdown-vault-mcp)
+          [ -n "$cid" ] || { echo "::error::markdown-vault-mcp is not running"; exit 1; }
+          docker exec -i "$cid" python - < scripts/okf_maintenance.py \
+            | tee -a "$GITHUB_STEP_SUMMARY"
