@@ -58,9 +58,13 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 
 ### What agents are told
 
-- **Authoring rules live in the vault**, in `_conventions.md` files: folders, frontmatter,
-  tags, links, file names. Agents read them with `get_conventions`, and every write result
-  repeats them.
+- **The vault follows the [Open Knowledge Format](docs/okf/SPEC.md) (OKF) v0.2**, an open
+  format for knowledge bases written by and for agents. Every note has a `type` and a one-line
+  `description`, `status` marks a note `draft`, `stable` or `deprecated`, and search ranks
+  deprecated and stale notes lower.
+- **Authoring rules live in the vault**, in `_conventions.md` files: which `type` goes in which
+  folder, frontmatter, tags, links, file names. Agents read them with `get_conventions`, and
+  every write result repeats them.
 - **MCP instructions** are the server's generated guidance plus two lines in `.env`:
   `INSTANCE_DESCRIPTION` (what this vault is) and `INSTRUCTIONS_EXTRA` (your rules, such as
   the language to write in, or offering to save lasting knowledge at the end of a task).
