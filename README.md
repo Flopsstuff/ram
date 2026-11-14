@@ -58,10 +58,11 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 
 ### What agents are told
 
-- **The vault follows the [Open Knowledge Format](docs/okf/SPEC.md) (OKF) v0.2**, an open
+- **The vault follows the [Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) (OKF) v0.2**, an open
   format for knowledge bases written by and for agents. Every note has a `type` and a one-line
   `description`, `status` marks a note `draft`, `stable` or `deprecated`, and search ranks
-  deprecated and stale notes lower.
+  deprecated and stale notes lower. `wiki-sync` keeps the spec itself in the vault as
+  `reference/okf-spec.md`, so agents can read it through MCP.
 - **Authoring rules live in the vault**, in `_conventions.md` files: which `type` goes in which
   folder, frontmatter, tags, links, file names. Agents read them with `get_conventions`, and
   every write result repeats them.

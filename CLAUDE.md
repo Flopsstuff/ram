@@ -97,6 +97,10 @@ three) and the browser wiki (the last three).
   - **`.git/info/exclude`** lists SilverBullet's own files (`CONFIG.md`, `Library/`, `_plug/`,
     `.silverbullet*`). It is local to the clone and never committed, so those files never reach
     the vault repo or the agents' index. `sync.sh` rewrites it on every start.
+  - **The OKF spec note.** On start it downloads `OKF_SPEC_URL` and writes it, with our
+    frontmatter, to `reference/okf-spec.md` in the vault, committing only when the text
+    changed. It is a real, tracked vault note (so MCP-only agents can `read` it); a hand edit is
+    overwritten on the next start, and a failed download keeps the old copy.
   - **Wiki settings come from this repo.** `wiki/space/` (`CONFIG.md`: page tree open on the
     left by default; `Library/wiki-style.md`: fonts) is mounted `:ro` and copied over the clone
     on every start, so edits made through SilverBullet's own settings screen are overwritten on
@@ -155,8 +159,9 @@ the **search tuning** (`DEFAULT_SEARCH_MODE=semantic` and `LENGTH_DOWNWEIGHT_ALP
 alpha of 0.25 divides each score by `1 + 0.25·ln(chunks)` and, with Gemini's narrow score band,
 ranks one-chunk notes above the right answer: top-1 accuracy was 16%, against 98% at 0.01.
 Re-check alpha with `bench/` plus a staging run if the model changes),
-`OKF_MODE=on` (the vault follows the Open Knowledge Format v0.2, spec copied in
-`docs/okf/SPEC.md`: every note has a `type`, `status` is OKF lifecycle only and workflow state
+`OKF_MODE=on` (the vault follows the Open Knowledge Format v0.2. `wiki-sync` keeps the spec in
+the vault as `reference/okf-spec.md`, downloaded on every start from `OKF_SPEC_URL`, pinned to a
+commit, and committed only when the text changed: every note has a `type`, `status` is OKF lifecycle only and workflow state
 lives in `state`, `index.md`/`log.md` are reserved. `on` adds ~205 units to the instructions, so
 `INSTRUCTIONS_EXTRA` must stay around 600 units to keep the total under 2,048. `OKF_WRITE` stays
 off: it re-serialises the whole frontmatter on every edit),
