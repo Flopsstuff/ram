@@ -41,6 +41,17 @@ weekly image-refresh cron), materializing every gitignored config from a GitHub 
 the bearer (`claude mcp add -t http -s user brain https://<MCP_DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"`),
 plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Auth = OAuth → log in at `<AUTH_DOMAIN>`).
 
+`.github/workflows/okf-maintenance.yml` runs nightly (02:30 UTC) on the same runner and in the
+same `ram-deploy` queue. It pipes `scripts/okf_maintenance.py` into the server container, which
+calls the server's own MCP tools on localhost with the bearer from the container's env, so every
+change is an ordinary server write: `okf_convert_links` (wikilinks the wiki inserts), `.md` added
+to extensionless links SilverBullet leaves after a rename, `okf_generate_index` for the root
+**and every folder** (a root call only creates missing indexes, it never refreshes existing
+ones), then `okf_validate` + `get_broken_links`; the job fails on a conformance failure or a
+broken link. It has **no checkout step on purpose**: `git clean` would delete the gitignored
+`.env` and config files the running containers bind-mount from the same workspace, so it runs
+the script from the last deploy's checkout.
+
 ## Architecture
 
 Six services in `docker-compose.yml` (compose project `ram-brain`): the MCP stack (the first
@@ -60,7 +71,7 @@ three) and the browser wiki (the last three).
     `Exited` container in every listing.)
   - **`cpus: "2.0"` + `cpu_shares: 256`.** FastEmbed/onnxruntime sizes its thread pool to
     the core count, so the boot reindex used to pin all 8 cores of the host for as long as
-    the re-embed took — see "Boot-time reindex" below for *why* it re-embeds at all.
+    the re-embed took (see "Boot-time reindex" below).
     Embeddings now come from the Gemini API, so a re-embed costs API calls rather than CPU;
     the cap stays as a guard in case the provider is switched back to local fastembed.
   - **`patches/sitecustomize.py` on `PYTHONPATH`** (mounted `./patches:/etc/ram/patches:ro`).
@@ -121,17 +132,13 @@ three) and the browser wiki (the last three).
   `<WIKI_DOMAIN>` here; the Authelia session cookie is on the parent domain, so one login covers
   the portal and the wiki.
 
-**Boot-time reindex — why a restart can burn minutes of CPU.** The server decides what changed
-by diffing the vault against `/data/state.json`, a path→SHA-256 snapshot. That snapshot is
-rewritten **only** by a full `build_index` / `reindex` pass (`tracker.update_state`), and a
-normal MCP `write` does not do that: the note lands on disk, in the FTS index, in the vector
-index and in git, but never in `state.json`. So the boot reconciliation sees every note written
-through the server since the last reindex as `added`, re-indexes it and **re-embeds it a second
-time**. The startup CPU spike is therefore proportional to how many notes were written since the
-last start — not to vault size, and not to how the container was started (verified: a restart
-after a day of writes reported `57 added` and pinned every core for ~70 s; a redeploy minutes
-later, with no writes in between, reported `0 added` and did nothing). Upstream issue, not a
-config error; the `cpus` cap is the local mitigation.
+**Boot-time reindex.** The server decides what changed by diffing the vault against
+`/data/state.json`, a path→SHA-256 snapshot. Older server versions rewrote that snapshot only on
+a full reindex, so every note written through MCP since the last one came back as `added` at the
+next start and was embedded a second time (once 57 notes, ~70 s of every core). On 6.1.1 that no
+longer happens: the restart after the OKF migration, which had edited all 116 notes through MCP,
+reported `0 added, 0 modified` and re-embedded nothing. If a restart ever shows a large `added`
+count again, this is where to look; the `cpus` cap is the guard.
 
 Data flow: `agents ─HTTPS→ Cloudflare edge → cloudflared →` either `markdown-vault-mcp →
 /vault (git) + /data` (MCP traffic) or `→ authelia` (the browser leg of the OAuth flow). The

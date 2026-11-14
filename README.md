@@ -77,7 +77,9 @@ Step by step, from an empty GitHub account to connected agents: **[INSTALL.md](I
 ## Deploying
 
 `.github/workflows/deploy.yml` deploys on every push to `main` (put `[skip ci]` in the commit
-message to skip) and refreshes the images weekly. The gitignored config files are rebuilt from
+message to skip) and refreshes the images weekly. A second workflow, `okf-maintenance.yml`, runs
+nightly: it turns wikilinks left by the wiki into OKF links, regenerates every folder's
+`index.md` and fails if a note breaks the format or a link breaks. The gitignored config files are rebuilt from
 GitHub secrets on every run:
 
 | Secret | Becomes |
