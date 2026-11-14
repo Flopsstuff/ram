@@ -46,12 +46,10 @@ plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Aut
 Three services in `docker-compose.yml` (compose project `ram-brain`):
 
 - **`markdown-vault-mcp`** — the server (`serve --transport http --host 0.0.0.0 --port 8000`).
-  Deliberately **no `ports:`** — the only ingress is through cloudflared. Three volumes:
-  `vault-data → /vault` (git-managed clone, initially empty), `app-data → /data`
-  (FTS index + embeddings + HTTP session KV), and `fastembed-cache → /data/state/fastembed`
-  (FastEmbed model weights, pointed at by `FASTEMBED_CACHE_DIR`; without it fastembed caches in
-  the container's `/tmp` and re-downloads the model on every recreate). Keeping `/data` out of
-  `/vault` is mandatory so index/state never get committed to the repo. Two non-obvious knobs:
+  Deliberately **no `ports:`** — the only ingress is through cloudflared. Two volumes:
+  `vault-data → /vault` (git-managed clone, initially empty) and `app-data → /data`
+  (FTS index + embeddings + HTTP session KV). Keeping `/data` out of `/vault` is
+  mandatory so index/state never get committed to the repo. Three non-obvious knobs:
   - **`entrypoint:` is overridden** to `chown` a still-root-owned `/vault` before handing
     over to the image's own `/usr/local/bin/docker-entrypoint.sh`. Load-bearing: named
     volumes mount root-owned and the stock entrypoint fixes only `/data`, so a fresh
@@ -62,6 +60,15 @@ Three services in `docker-compose.yml` (compose project `ram-brain`):
   - **`cpus: "2.0"` + `cpu_shares: 256`.** FastEmbed/onnxruntime sizes its thread pool to
     the core count, so the boot reindex used to pin all 8 cores of the host for as long as
     the re-embed took — see "Boot-time reindex" below for *why* it re-embeds at all.
+    Embeddings now come from the Gemini API, so a re-embed costs API calls rather than CPU;
+    the cap stays as a guard in case the provider is switched back to local fastembed.
+  - **`patches/sitecustomize.py` on `PYTHONPATH`** (mounted `./patches:/etc/ram/patches:ro`).
+    Python imports it at startup; it fills the `index` that Gemini's OpenAI-compat endpoint
+    omits on the first embedding (protobuf drops the default `0`). Without it the server's
+    `sorted(..., key=lambda d: d.index)` raises `TypeError` on every batch, and indexing
+    dies. Single-query search would still work, which hides the failure. It is a no-op for
+    responses that carry every index. Remove the file, the mount and `PYTHONPATH` once the
+    upstream fix (`index or 0`) ships in a release.
 - **`cloudflared`** — the tunnel. Credentials are still env-driven (`command: tunnel run
   ${CF_TUNNEL_ID}` + `TUNNEL_CRED_CONTENTS` inlined), but ingress is now a **mounted
   `cloudflared/config.yml`** (`--config /etc/cloudflared/config.yml`, `:ro`), because two
@@ -101,10 +108,15 @@ Cloudflare Access.**
 Configuration lives in three gitignored files, each with a committed `*.example` template:
 `.env`, `cloudflared/config.yml`, and `authelia/configuration.yml` (+ `authelia/users_database.yml`).
 
-`.env` (all app vars are `MARKDOWN_VAULT_MCP_*`): core vault paths, `EMBEDDING_PROVIDER=fastembed`
-with `FASTEMBED_MODEL=sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (the default
-`bge-small-en` is English-only and the vault is Russian; changing the model forces a full
-re-embed on the next start) and `FASTEMBED_CACHE_DIR=/data/state/fastembed`,
+`.env` (all app vars are `MARKDOWN_VAULT_MCP_*`): core vault paths, the **embeddings block**
+(`EMBEDDING_PROVIDER=openai` pointed at Google AI Studio: `OPENAI_BASE_URL` = Gemini's
+OpenAI-compat endpoint, `OPENAI_EMBEDDING_MODEL=gemini-embedding-2`, the key in the **bare**
+`OPENAI_API_KEY`, which has no prefix, plus `EMBED_CONTEXT=true`. The choice was made with
+`bench/`; changing provider, model or `EMBED_CONTEXT` forces a full re-embed on the next start),
+the **search tuning** (`DEFAULT_SEARCH_MODE=semantic` and `LENGTH_DOWNWEIGHT_ALPHA=0.01`. The upstream
+alpha of 0.25 divides each score by `1 + 0.25·ln(chunks)` and, with Gemini's narrow score band,
+ranks one-chunk notes above the right answer: top-1 accuracy was 16%, against 98% at 0.01.
+Re-check alpha with `bench/` plus a staging run if the model changes),
 the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<AUTH_DOMAIN>/.well-known/openid-configuration`,
 `OIDC_CLIENT_ID=ram-brain`, `OIDC_CLIENT_SECRET` = *plaintext* whose pbkdf2 hash is in Authelia's
 config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,email`), managed-git
