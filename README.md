@@ -18,11 +18,13 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 | **MCP endpoint** | `https://<MCP_DOMAIN>/mcp`, streamable HTTP |
 | **Auth** | multi-auth: a static bearer token (headless agents) **or** OAuth 2.1 / OIDC through Authelia (GUI clients) |
 | **Wiki** | `https://<WIKI_DOMAIN>`: SilverBullet behind Authelia forward-auth |
-| **Login portal** | `https://<AUTH_DOMAIN>`: Authelia, one user, for both OAuth and the wiki |
+| **Login portal** | `https://<AUTH_DOMAIN>`: Authelia, the users in `users_database.yml`, for both OAuth and the wiki |
 | **Search** | semantic by default on `gemini-embedding-2` (Google AI Studio), with note title and heading context |
 | **Vault** | a private GitHub repo `<owner>/<vault-repo>`, cloned and managed read-write by the server |
 | **Ingress** | Cloudflare Tunnel, three hostnames, no published ports |
 | **Deploy** | push to `main` → GitHub Actions → self-hosted runner → `docker compose` |
+
+**Install your own:** [INSTALL.md](INSTALL.md).
 
 ## What's inside
 
@@ -118,60 +120,9 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 
 ## First-time setup
 
-1. **Server secrets.** Copy `.env.example` → `.env` and fill:
-   - `MARKDOWN_VAULT_MCP_BEARER_TOKEN` (`openssl rand -hex 32`);
-   - `MARKDOWN_VAULT_MCP_GIT_TOKEN`: a GitHub fine-grained PAT, *Contents: Read and write* on the
-     vault repo, owned by the account that owns that repo;
-   - `OPENAI_API_KEY`: a Google AI Studio key (bare name, no prefix);
-   - the `MARKDOWN_VAULT_MCP_OIDC_*` block: client secret (plaintext, see step 2) and a
-     **stable** `openssl rand -hex 32` signing key. Leave `AUTH_MODE` unset: auto-detect enables
-     multi-auth when both bearer and OIDC are present.
-
-2. **Authelia.** Copy both `.example` files under `authelia/` to their real names and fill
-   in the secrets:
-   ```bash
-   IMG=authelia/authelia:latest
-   # JWKS private key → paste into configuration.yml (identity_providers.oidc.jwks[].key)
-   docker run --rm --entrypoint authelia -u "$(id -u):$(id -g)" -v "$PWD/authelia":/keys $IMG \
-     crypto pair rsa generate --directory /keys
-   # client secret: plaintext → .env (OIDC_CLIENT_SECRET), $pbkdf2$ hash → configuration.yml
-   docker run --rm --entrypoint authelia $IMG \
-     crypto hash generate pbkdf2 --variant sha512 --random --random.length 72
-   # login password hash → users_database.yml
-   docker run --rm --entrypoint authelia $IMG crypto hash generate argon2 --password '<login-password>'
-   # hmac / session / storage / jwt secrets (run once each) → configuration.yml
-   docker run --rm --entrypoint authelia $IMG crypto rand --length 64 --charset alphanumeric
-   ```
-   Validate before deploying:
-   ```bash
-   docker run --rm --entrypoint authelia -v "$PWD/authelia":/config $IMG \
-     validate-config --config /config/configuration.yml
-   ```
-   The single user in `users_database.yml` **is** the allowlist. The session cookie goes on
-   the parent domain of `<AUTH_DOMAIN>`, so the wiki host must sit under it too.
-
-3. **Cloudflare Tunnel** (once, on a machine with a browser):
-   ```bash
-   cloudflared tunnel login
-   cloudflared tunnel create my-tunnel                    # prints TUNNEL_ID + creds json path
-   cloudflared tunnel route dns my-tunnel <MCP_DOMAIN>    # all three hosts point at
-   cloudflared tunnel route dns my-tunnel <AUTH_DOMAIN>   # the same tunnel
-   cloudflared tunnel route dns my-tunnel <WIKI_DOMAIN>
-   ```
-   Copy `cloudflared/config.yml.example` → `cloudflared/config.yml`, set the tunnel ID and the
-   real hostnames, then put into `.env`:
-   - `CF_TUNNEL_ID` = the printed tunnel UUID;
-   - `TUNNEL_CRED_CONTENTS` = the creds JSON on one line.
-
-   **Do NOT** put Cloudflare Access on any of these hostnames. It breaks the bearer header for
-   headless agents and injects its own auth in front of both Authelia flows.
-
-4. **Bring up:**
-   ```bash
-   docker compose up -d
-   docker compose logs -f markdown-vault-mcp   # clone, index build, embeddings
-   docker compose logs -f wiki-sync            # the wiki's clone
-   ```
+The full step-by-step recipe, from an empty GitHub account to agents connected, is in
+**[INSTALL.md](INSTALL.md)**: repos and tokens, `.env`, Authelia secrets, the tunnel, the
+runner, GitHub secrets, first deploy, checks, and running one instance for several people.
 
 ### Deploying via CI (self-hosted runner)
 
