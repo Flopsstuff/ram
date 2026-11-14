@@ -155,9 +155,11 @@ the **search tuning** (`DEFAULT_SEARCH_MODE=semantic` and `LENGTH_DOWNWEIGHT_ALP
 alpha of 0.25 divides each score by `1 + 0.25·ln(chunks)` and, with Gemini's narrow score band,
 ranks one-chunk notes above the right answer: top-1 accuracy was 16%, against 98% at 0.01.
 Re-check alpha with `bench/` plus a staging run if the model changes),
-`OKF_MODE=off` (the vault is not an OKF bundle; on auto the server told agents to keep
-`log.md`/`index.md` and use relative Markdown links, and pushed the instructions past
-Claude Code's 2,048-character cap),
+`OKF_MODE=on` (the vault follows the Open Knowledge Format v0.2; a copy of the spec is a plain
+vault note, `reference/okf/SPEC.md`, so MCP-only agents can `read` it: every note has a `type`, `status` is OKF lifecycle only and workflow state
+lives in `state`, `index.md`/`log.md` are reserved. `on` adds ~205 units to the instructions, so
+`INSTRUCTIONS_EXTRA` must stay around 600 units to keep the total under 2,048. `OKF_WRITE` stays
+off: it re-serialises the whole frontmatter on every edit),
 the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<AUTH_DOMAIN>/.well-known/openid-configuration`,
 `OIDC_CLIENT_ID=ram-brain`, `OIDC_CLIENT_SECRET` = *plaintext* whose pbkdf2 hash is in Authelia's
 config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,email`), managed-git
