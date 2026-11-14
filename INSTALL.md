@@ -158,7 +158,27 @@ embedding call per section for a big one. The wiki makes its own clone next to i
   ```
 - **GUI clients** (Claude web and mobile, ChatGPT developer mode): add
   `https://<MCP_DOMAIN>/mcp`, choose OAuth, and log in at `<AUTH_DOMAIN>`.
-- More clients and OAuth troubleshooting: [README → Connect and verify](README.md#connect-and-verify).
+
+### If the OAuth login fails
+
+Both fixes go into the `ram-brain` client in `authelia/configuration.yml`:
+
+- **`invalid_target` at the login redirect.** MCP clients send
+  `resource=https://<MCP_DOMAIN>/mcp` (RFC 8707). Add `https://<MCP_DOMAIN>` and
+  `https://<MCP_DOMAIN>/mcp` to the client's `audience`.
+- **`invalid_client` at the token exchange.** The server authenticates with HTTP Basic. Set
+  `token_endpoint_auth_method: 'client_secret_basic'`.
+
+## Rotating credentials
+
+Change the value, update its GitHub secret, deploy.
+
+| Rotate | Effect |
+| --- | --- |
+| `MARKDOWN_VAULT_MCP_BEARER_TOKEN` | every bearer agent needs the new token |
+| `MARKDOWN_VAULT_MCP_GIT_TOKEN` | sync stops for the server and the wiki until `.env` has the new one |
+| `MARKDOWN_VAULT_MCP_OIDC_JWT_SIGNING_KEY` | the **OAuth kill switch**: every OAuth token dies at once |
+| a password in `users_database.yml` | that user logs in with the new one |
 
 ## Several people on one instance
 

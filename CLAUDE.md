@@ -155,6 +155,9 @@ the **search tuning** (`DEFAULT_SEARCH_MODE=semantic` and `LENGTH_DOWNWEIGHT_ALP
 alpha of 0.25 divides each score by `1 + 0.25·ln(chunks)` and, with Gemini's narrow score band,
 ranks one-chunk notes above the right answer: top-1 accuracy was 16%, against 98% at 0.01.
 Re-check alpha with `bench/` plus a staging run if the model changes),
+`OKF_MODE=off` (the vault is not an OKF bundle; on auto the server told agents to keep
+`log.md`/`index.md` and use relative Markdown links, and pushed the instructions past
+Claude Code's 2,048-character cap),
 the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<AUTH_DOMAIN>/.well-known/openid-configuration`,
 `OIDC_CLIENT_ID=ram-brain`, `OIDC_CLIENT_SECRET` = *plaintext* whose pbkdf2 hash is in Authelia's
 config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,email`), managed-git
