@@ -113,6 +113,10 @@ Configuration lives in three gitignored files, each with a committed `*.example`
 OpenAI-compat endpoint, `OPENAI_EMBEDDING_MODEL=gemini-embedding-2`, the key in the **bare**
 `OPENAI_API_KEY`, which has no prefix, plus `EMBED_CONTEXT=true`. The choice was made with
 `bench/`; changing provider, model or `EMBED_CONTEXT` forces a full re-embed on the next start),
+the **search tuning** (`DEFAULT_SEARCH_MODE=semantic` and `LENGTH_DOWNWEIGHT_ALPHA=0.01`. The upstream
+alpha of 0.25 divides each score by `1 + 0.25·ln(chunks)` and, with Gemini's narrow score band,
+ranks one-chunk notes above the right answer: top-1 accuracy was 16%, against 98% at 0.01.
+Re-check alpha with `bench/` plus a staging run if the model changes),
 the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<AUTH_DOMAIN>/.well-known/openid-configuration`,
 `OIDC_CLIENT_ID=ram-brain`, `OIDC_CLIENT_SECRET` = *plaintext* whose pbkdf2 hash is in Authelia's
 config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,email`), managed-git
