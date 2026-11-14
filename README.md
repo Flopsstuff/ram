@@ -178,8 +178,10 @@ consequences agents keep tripping over:
   first-class *inside* the served vault (via the MCP tools). If you need a link that also clicks
   in the git web UI, use a plain `[text](relative/path.md)` Markdown link instead.
 
-The server surfaces the same rule to every agent via `instructions.md`
-(`MARKDOWN_VAULT_MCP_INSTRUCTIONS`).
+Agents get these rules from the vault's own `_conventions.md` files (served by `get_conventions`
+and attached to every write result). The server's MCP instructions are its generated guidance plus
+`MARKDOWN_VAULT_MCP_INSTANCE_DESCRIPTION` / `_INSTRUCTIONS_EXTRA` from `.env`. This repo is
+public, so nothing vault-specific lives in it.
 
 ## Design rationale
 
