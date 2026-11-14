@@ -40,13 +40,11 @@ services:
         fi
         exec /usr/local/bin/docker-entrypoint.sh "$$@"
       - --
-    # The app only reads instructions from MARKDOWN_VAULT_MCP_INSTRUCTIONS (env), so
-    # inject the editable ./instructions.md into it before exec'ing the server.
-    # ($$ becomes $ after compose interpolation → the shell runs $(cat ...).)
-    command:
-      - sh
-      - -c
-      - export MARKDOWN_VAULT_MCP_INSTRUCTIONS="$$(cat /etc/ram/instructions.md)"; exec markdown-vault-mcp serve --transport http --host 0.0.0.0 --port 8000
+    # MCP instructions come from the server's own generated guidance plus two env
+    # vars in .env: MARKDOWN_VAULT_MCP_INSTANCE_DESCRIPTION and _INSTRUCTIONS_EXTRA.
+    # Vault-specific rules live in the vault's _conventions.md files, not in this
+    # public repo.
+    command: ["markdown-vault-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8000"]
     env_file:
       - .env
     environment:
@@ -59,7 +57,6 @@ services:
       # the first embedding, without which batch indexing dies with TypeError.
       # Remove both lines once the upstream fix ships.
       - ./patches:/etc/ram/patches:ro
-      - ./instructions.md:/etc/ram/instructions.md:ro  # editable server instructions
     networks:
       - brain
     # NOTE: intentionally no `ports:` — reachable only through cloudflared.

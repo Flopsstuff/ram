@@ -166,6 +166,13 @@ for the runner (it reads the secret, not git).
   returns `invalid_target` otherwise; and `token_endpoint_auth_method` must be
   `client_secret_basic` (FastMCP authenticates to the token endpoint with HTTP Basic) — else the
   code→token exchange fails with `invalid_client`.
+- **This repo is public: nothing about the vault's content goes in it.** That covers note names,
+  folder layout, employers, projects and people. The MCP instructions are the server's generated
+  guidance plus `MARKDOWN_VAULT_MCP_INSTANCE_DESCRIPTION` / `_INSTRUCTIONS_EXTRA` from `.env`
+  (private, via the `DOTENV` secret); keep those two generic. Vault-specific authoring rules live
+  in the vault's own `_conventions.md` files. The old `instructions.md`, injected through the
+  deprecated `MARKDOWN_VAULT_MCP_INSTRUCTIONS`, was removed for this reason. It also replaced the
+  server's own guidance and ran past Claude Code's ~2,048-character instructions limit.
 - **Never commit secrets, and never place a secret inside the vault repo** — the vault is
   pushed to `github.com/<owner>/<vault-repo>`, so anything under `/vault` leaves the host. The
   real `.env`, `cloudflared/config.yml`, and `authelia/*.yml` are gitignored; only `*.example`
