@@ -111,8 +111,11 @@ three) and the browser wiki (the last three).
   has no `index.md`. Runs as root (owner of the fresh volume), same as `wiki-sync`, so files
   from either side stay writable by both.
 - **`wiki-proxy`** — Caddy with `wiki/Caddyfile` (mounted `:ro`): `forward_auth` to
-  `authelia:9091` on every request, then `reverse_proxy wiki:3000`, except SilverBullet's
-  favicon/manifest-icon paths, which it serves from `wiki/icons/` (mounted `:ro`). Sets
+  `authelia:9091`, then `reverse_proxy wiki:3000`. Two exceptions skip the login, both static
+  files with nothing from the vault: the favicon/manifest-icon paths, served from `wiki/icons/`
+  (mounted `:ro`), and **`/service_worker.js`**. Browsers refuse to register a service worker
+  whose script answers with a redirect, and that request got Authelia's login redirect, which
+  broke SilverBullet's offline cache with an error banner on every load. Sets
   `X-Forwarded-Proto: https` on the auth subrequest because TLS ends at Cloudflare and Authelia
   needs the public scheme to match the cookie domain and build the redirect. Cloudflared routes
   `<WIKI_DOMAIN>` here; the Authelia session cookie is on the parent domain, so one login covers
