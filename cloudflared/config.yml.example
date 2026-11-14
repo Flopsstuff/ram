@@ -8,6 +8,8 @@ tunnel: <CF_TUNNEL_ID>
 ingress:
   - hostname: <MCP_DOMAIN>            # the MCP server
     service: http://markdown-vault-mcp:8000
-  - hostname: <AUTH_DOMAIN>           # Authelia (OIDC IdP)
+  - hostname: <AUTH_DOMAIN>           # Authelia (OIDC IdP + login portal)
     service: http://authelia:9091
+  - hostname: <WIKI_DOMAIN>           # the wiki, behind Authelia forward-auth
+    service: http://wiki-proxy:80
   - service: http_status:404         # catch-all (required last rule)

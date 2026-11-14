@@ -1,0 +1,24 @@
+# wiki-proxy: puts Authelia's login in front of SilverBullet.
+#
+# cloudflared → this proxy (plain HTTP inside the compose network) → wiki.
+# Every request is first checked with Authelia's forward-auth endpoint: a
+# logged-in session passes through, anything else is redirected to the Authelia
+# portal. The session cookie is issued for the parent domain, so one login
+# covers both the portal and the wiki. The hostname lives only in
+# cloudflared/config.yml; this file matches any host.
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	forward_auth authelia:9091 {
+		uri /api/authz/forward-auth
+		# TLS ends at Cloudflare's edge, so this hop is plain HTTP; Authelia
+		# must still see the public scheme to build the redirect and match the
+		# cookie domain.
+		header_up X-Forwarded-Proto https
+		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
+	}
+	reverse_proxy wiki:3000
+}
