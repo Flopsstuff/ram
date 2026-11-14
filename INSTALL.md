@@ -4,13 +4,19 @@ This recipe stands up a new, independent instance from scratch: its own vault, i
 its own host. Plan about an hour; most of it is waiting for DNS and the first deploy. What each
 piece does and why it is built this way is in [README.md](README.md).
 
+> **Git is optional.** By default the server keeps the vault in a GitHub repo: every write is
+> committed and pushed, which gives you a backup and full history. Without git the vault is a
+> plain folder on the `vault-data` volume, and you skip every step marked **(git only)**. The
+> cost: no off-host copy, no history, no rollback of an overwritten note, and no wiki (it syncs
+> through git).
+
 ## 0. What you need
 
 | Item | Notes |
 | --- | --- |
 | An always-on host with Docker + Compose v2 | No inbound ports: all traffic arrives through the tunnel. |
 | A domain on Cloudflare | Three hostnames under **one parent domain**: `<MCP_DOMAIN>`, `<AUTH_DOMAIN>`, `<WIKI_DOMAIN>` (for example `brain.`, `auth.` and `wiki.` of the same domain). Authelia's login cookie is set on the parent, so it must cover all three. |
-| A GitHub account | Owns the vault repo. The fine-grained token in step 1 must belong to this same account: it can't reach a repo where it is only a collaborator. |
+| A GitHub account **(git only)** | Owns the vault repo. The fine-grained token in step 1 must belong to this same account: it can't reach a repo where it is only a collaborator. |
 | A Google AI Studio API key | For `gemini-embedding-2`. Create one at <https://aistudio.google.com/apikey>. |
 | On your laptop | `git`, `gh` (logged in), `docker`, `cloudflared`, `openssl`. |
 
@@ -19,15 +25,16 @@ piece does and why it is built this way is in [README.md](README.md).
 1. **Infra repo.** Copy this repository under your account (fork it, or create a new repo and
    push this one into it). Real configuration never lands in git, only the `*.example`
    templates, so the repo can stay public.
-2. **Vault repo.** Create a private repo with one first commit:
+2. **Vault repo (git only).** Create a private repo with one first commit:
    ```bash
    gh repo create <owner>/<vault-repo> --private --add-readme
    ```
-3. **The vault's rules.** Add a root `_conventions.md` to the vault: which folder holds what,
+3. **The vault's rules.** Add a root `_conventions.md` to the vault (without git, write it
+   through the server once it is up): which folder holds what,
    required frontmatter, how to link notes, and "never write secret values". Agents fetch it
    with `get_conventions` before writing, and every write result repeats it. Folders can get
    their own `_conventions.md` later; they add to the root rules.
-4. **Token for the server.** A fine-grained personal access token. Its owner is the vault
+4. **Token for the server (git only).** A fine-grained personal access token. Its owner is the vault
    repo's owner, it has access to that one repo only, with *Contents: Read and write*.
 
 ## 2. Configuration
@@ -42,9 +49,9 @@ Copy `.env.example` to `.env` and fill in:
 | --- | --- |
 | `MARKDOWN_VAULT_MCP_BASE_URL` | `https://<MCP_DOMAIN>` |
 | `MARKDOWN_VAULT_MCP_BEARER_TOKEN` | `openssl rand -hex 32`: the shared token for headless agents |
-| `MARKDOWN_VAULT_MCP_GIT_REPO_URL` | `https://github.com/<owner>/<vault-repo>.git` (HTTPS only) |
-| `MARKDOWN_VAULT_MCP_GIT_TOKEN` | the token from step 1.4 |
-| `MARKDOWN_VAULT_MCP_GIT_COMMIT_NAME` / `_EMAIL` | the identity on the server's commits; required |
+| `MARKDOWN_VAULT_MCP_GIT_REPO_URL` **(git only)** | `https://github.com/<owner>/<vault-repo>.git` (HTTPS only). Without git, leave every `GIT_*` variable unset |
+| `MARKDOWN_VAULT_MCP_GIT_TOKEN` **(git only)** | the token from step 1.4 |
+| `MARKDOWN_VAULT_MCP_GIT_COMMIT_NAME` / `_EMAIL` **(git only)** | the identity on the server's commits; required with git |
 | `OPENAI_API_KEY` | the AI Studio key. The bare name, no prefix: the server talks to Gemini through its OpenAI-compatible endpoint |
 | `MARKDOWN_VAULT_MCP_INSTANCE_DESCRIPTION` | one line on what this vault is for |
 | `MARKDOWN_VAULT_MCP_INSTRUCTIONS_EXTRA` | your rules for agents: language, search habits, when to offer saving knowledge. Keep both under ~500 characters in total: Claude Code cuts a server's instructions at 2,048 |
