@@ -1,0 +1,5 @@
+# Everything private to a run: the vault clone, real queries, embedding cache,
+# per-query results, the venv. Only code, docs and the synthetic sample are committed.
+.data/
+.env
+__pycache__/

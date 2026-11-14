@@ -1,0 +1,8 @@
+[
+ {"q": "как часто делаются бэкапы и как проверяют, что из них можно восстановиться", "relevant": ["backup-policy.md"]},
+ {"q": "кофеварка мигает красным, что делать", "relevant": ["coffee-machine.md"]},
+ {"q": "what should a new hire do in the first week", "relevant": ["onboarding.md"]},
+ {"q": "how much notice do I need to give before taking time off", "relevant": ["vacation.md"]},
+ {"q": "постепенная выкатка новой версии в сторы и что делать, если приложение падает", "relevant": ["release-process.md"]},
+ {"q": "заболел, нужно ли что-то оформлять заранее", "relevant": ["vacation.md"]}
+]
