@@ -97,15 +97,22 @@ three) and the browser wiki (the last three).
   - **`.git/info/exclude`** lists SilverBullet's own files (`CONFIG.md`, `Library/`, `_plug/`,
     `.silverbullet*`). It is local to the clone and never committed, so those files never reach
     the vault repo or the agents' index. `sync.sh` rewrites it on every start.
+  - **Wiki settings come from this repo.** `wiki/space/` (`CONFIG.md`: page tree open on the
+    left by default; `Library/wiki-style.md`: fonts) is mounted `:ro` and copied over the clone
+    on every start, so edits made through SilverBullet's own settings screen are overwritten on
+    the next deploy. Both pages carry `pageDecoration.hide` so they stay out of the tree.
   - The token never touches disk: the credential helper in `.git/config` reads it from env.
   - Its healthcheck (`/data/.git` exists) gates `wiki`: SilverBullet on an empty folder would
     set up a fresh space there and the clone would then refuse the non-empty directory.
-- **`wiki`** — SilverBullet (`latest-slim`, no Chromium) on `wiki-data`. **No auth of its own
+- **`wiki`** — SilverBullet (**pinned `2.12.1-slim`**, no Chromium) on `wiki-data`. Pinned
+  because 3.0 moves `CONFIG.md` to `Library/Config.md` and runs `space-lua` only from `Library/`;
+  bump it by hand and check `wiki/space/` still applies. **No auth of its own
   and no `ports:`**: the only way in is `wiki-proxy`. `SB_INDEX_PAGE=README` because the vault
   has no `index.md`. Runs as root (owner of the fresh volume), same as `wiki-sync`, so files
   from either side stay writable by both.
 - **`wiki-proxy`** — Caddy with `wiki/Caddyfile` (mounted `:ro`): `forward_auth` to
-  `authelia:9091` on every request, then `reverse_proxy wiki:3000`. Sets
+  `authelia:9091` on every request, then `reverse_proxy wiki:3000`, except SilverBullet's
+  favicon/manifest-icon paths, which it serves from `wiki/icons/` (mounted `:ro`). Sets
   `X-Forwarded-Proto: https` on the auth subrequest because TLS ends at Cloudflare and Authelia
   needs the public scheme to match the cookie domain and build the redirect. Cloudflared routes
   `<WIKI_DOMAIN>` here; the Authelia session cookie is on the parent domain, so one login covers

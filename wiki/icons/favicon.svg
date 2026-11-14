@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- A RAM stick: "ram" = Random Agents Memories. -->
+  <rect x="2" y="14" width="60" height="34" rx="5" fill="#1f6f4a"/>
+  <rect x="8" y="20" width="12" height="16" rx="2" fill="#16231c"/>
+  <rect x="26" y="20" width="12" height="16" rx="2" fill="#16231c"/>
+  <rect x="44" y="20" width="12" height="16" rx="2" fill="#16231c"/>
+  <g fill="#e8b84a">
+    <rect x="8" y="41" width="3" height="7"/>
+    <rect x="14" y="41" width="3" height="7"/>
+    <rect x="20" y="41" width="3" height="7"/>
+    <rect x="26" y="41" width="3" height="7"/>
+    <rect x="36" y="41" width="3" height="7"/>
+    <rect x="42" y="41" width="3" height="7"/>
+    <rect x="48" y="41" width="3" height="7"/>
+    <rect x="54" y="41" width="3" height="7"/>
+  </g>
+</svg>

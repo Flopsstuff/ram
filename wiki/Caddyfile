@@ -20,5 +20,17 @@
 		header_up X-Forwarded-Proto https
 		copy_headers Remote-User Remote-Groups Remote-Email Remote-Name
 	}
-	reverse_proxy wiki:3000
+
+	# Our own favicon set (wiki/icons) instead of SilverBullet's, at the
+	# paths its page and web manifest point to.
+	@icons path /.client/favicon.svg /.client/favicon-96x96.png /.client/favicon.ico /.client/apple-touch-icon.png /.client/logo-dock.png
+	handle @icons {
+		root * /srv/icons
+		uri strip_prefix /.client
+		file_server
+	}
+
+	handle {
+		reverse_proxy wiki:3000
+	}
 }

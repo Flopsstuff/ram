@@ -62,6 +62,14 @@ _plug/
 .silverbullet*
 EOF
 
+# Wiki settings and style from the infra repo (wiki/space/, mounted read-only):
+# copied over on every start, so the repo is their source of truth. They land
+# only on excluded paths (CONFIG.md, Library/), never in the vault repo.
+if [ -d /etc/wiki/space ]; then
+  cp -R /etc/wiki/space/. "$DIR"/
+  log "wiki settings copied in"
+fi
+
 # Rebase local commits onto the remote, then push. Returns non-zero, with the
 # rebase aborted, when either step fails; the caller retries later.
 sync_remote() {
