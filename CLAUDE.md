@@ -46,10 +46,12 @@ plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Aut
 Three services in `docker-compose.yml` (compose project `ram-brain`):
 
 - **`markdown-vault-mcp`** — the server (`serve --transport http --host 0.0.0.0 --port 8000`).
-  Deliberately **no `ports:`** — the only ingress is through cloudflared. Two volumes:
-  `vault-data → /vault` (git-managed clone, initially empty) and `app-data → /data`
-  (FTS index + embeddings + HTTP session KV). Keeping `/data` out of `/vault` is
-  mandatory so index/state never get committed to the repo. Two non-obvious knobs:
+  Deliberately **no `ports:`** — the only ingress is through cloudflared. Three volumes:
+  `vault-data → /vault` (git-managed clone, initially empty), `app-data → /data`
+  (FTS index + embeddings + HTTP session KV), and `fastembed-cache → /data/state/fastembed`
+  (FastEmbed model weights, pointed at by `FASTEMBED_CACHE_DIR`; without it fastembed caches in
+  the container's `/tmp` and re-downloads the model on every recreate). Keeping `/data` out of
+  `/vault` is mandatory so index/state never get committed to the repo. Two non-obvious knobs:
   - **`entrypoint:` is overridden** to `chown` a still-root-owned `/vault` before handing
     over to the image's own `/usr/local/bin/docker-entrypoint.sh`. Load-bearing: named
     volumes mount root-owned and the stock entrypoint fixes only `/data`, so a fresh
@@ -99,7 +101,10 @@ Cloudflare Access.**
 Configuration lives in three gitignored files, each with a committed `*.example` template:
 `.env`, `cloudflared/config.yml`, and `authelia/configuration.yml` (+ `authelia/users_database.yml`).
 
-`.env` (all app vars are `MARKDOWN_VAULT_MCP_*`): core vault paths, `EMBEDDING_PROVIDER=fastembed`,
+`.env` (all app vars are `MARKDOWN_VAULT_MCP_*`): core vault paths, `EMBEDDING_PROVIDER=fastembed`
+with `FASTEMBED_MODEL=sentence-transformers/paraphrase-multilingual-mpnet-base-v2` (the default
+`bge-small-en` is English-only and the vault is Russian; changing the model forces a full
+re-embed on the next start) and `FASTEMBED_CACHE_DIR=/data/state/fastembed`,
 the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<AUTH_DOMAIN>/.well-known/openid-configuration`,
 `OIDC_CLIENT_ID=ram-brain`, `OIDC_CLIENT_SECRET` = *plaintext* whose pbkdf2 hash is in Authelia's
 config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,email`), managed-git
