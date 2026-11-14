@@ -36,7 +36,7 @@ wiki users (browser) ───────────────────�
 | `authelia/configuration.yml.example` / `.yml` | Authelia+OIDC template / **real** (secrets, JWKS, client) | ✅ / 🚫 |
 | `authelia/users_database.yml.example` / `.yml` | allowlist template / **real** (user + password hash) | ✅ / 🚫 |
 | `patches/sitecustomize.py` | startup patch: fills the embedding `index` Gemini omits (until the upstream fix ships) | ✅ |
-| `wiki/` | `sync.sh` (git sync of the wiki's clone) and `Caddyfile` (Authelia forward-auth in front of the wiki) | ✅ |
+| `wiki/` | `sync.sh` (git sync of the wiki's clone), `Caddyfile` (Authelia forward-auth in front of the wiki), `space/` (wiki settings and fonts, copied in on start), `icons/` (favicon set) | ✅ |
 | `bench/` | embedding-model comparison harness; real corpus, queries and keys stay in gitignored `bench/.data/` and `bench/.env` | ✅ (code only) |
 
 cloudflared routes two hostnames through one tunnel via `cloudflared/config.yml` ingress
@@ -186,10 +186,14 @@ services:
   carry `<GIT_COMMIT_NAME> (wiki)` as the author.
 - **`wiki`** is SilverBullet on that clone. Its own files (`CONFIG.md`, `Library/`, `_plug/`)
   are listed in the clone's `.git/info/exclude`, which is never committed, so they stay out of
-  the vault and the agents' search.
+  the vault and the agents' search. Its settings live in this repo, `wiki/space/`: the page tree
+  opens on the left by default and the text uses the system sans-serif font. `wiki-sync` copies
+  them in on every start, so change them here, not in the browser. The image is pinned
+  (`2.12.1-slim`) because SilverBullet 3.0 moves the config location.
 - **`wiki-proxy`** (Caddy, `wiki/Caddyfile`) asks Authelia's forward-auth endpoint about every
   request. Without a session you land on the Authelia portal; Authelia's cookie is set on the
   parent domain, so one login covers it. SilverBullet itself has no auth and no published port.
+  The proxy also serves the wiki's favicon set from `wiki/icons/` in place of SilverBullet's.
 
 ### Note-linking convention (wikilinks)
 

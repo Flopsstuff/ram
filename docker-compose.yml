@@ -123,6 +123,7 @@ services:
     volumes:
       - wiki-data:/data
       - ./wiki/sync.sh:/etc/wiki/sync.sh:ro
+      - ./wiki/space:/etc/wiki/space:ro   # wiki settings + style, copied in on start
     # SilverBullet must not start on an empty folder (it would set up a fresh
     # space there and the clone would refuse the non-empty directory).
     healthcheck:
@@ -136,10 +137,14 @@ services:
   # SilverBullet: the browser editor. No auth of its own: it is reachable only
   # through wiki-proxy, which lets in nobody without an Authelia session.
   wiki:
-    image: ghcr.io/silverbulletmd/silverbullet:latest-slim
+    # Pinned: 3.0 is on the way and moves CONFIG.md to Library/Config.md and
+    # runs space-lua only from Library/. Bump deliberately, after checking
+    # wiki/space/ still applies.
+    image: ghcr.io/silverbulletmd/silverbullet:2.12.1-slim
     restart: unless-stopped
     environment:
       SB_INDEX_PAGE: README     # the vault has no index.md; open its README
+      SB_NAME: ram wiki         # app name in the web manifest (installed PWA)
     volumes:
       - wiki-data:/data
     depends_on:
@@ -157,6 +162,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./wiki/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./wiki/icons:/srv/icons:ro          # our favicon set, served instead of SilverBullet's
     depends_on:
       - wiki
       - authelia
