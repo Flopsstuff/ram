@@ -101,23 +101,6 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 - **This repo is public**, so nothing vault-specific lives in it: no note names, folders or
   instruction text.
 
-## Files
-
-| File | Purpose | In git? |
-| --- | --- | --- |
-| `docker-compose.yml` | the six services, their volumes and the `brain` network | ✅ |
-| `.env.example` / `.env` | env template / **real secrets** (bearer, OIDC, git PAT, Gemini key, tunnel) | ✅ / 🚫 |
-| `cloudflared/config.yml.example` / `.yml` | tunnel ingress template / **real** (tunnel ID + hostnames) | ✅ / 🚫 |
-| `authelia/configuration.yml.example` / `.yml` | Authelia (OIDC + forward-auth) template / **real** (secrets, JWKS, client) | ✅ / 🚫 |
-| `authelia/users_database.yml.example` / `.yml` | allowlist template / **real** (user + password hash) | ✅ / 🚫 |
-| `patches/sitecustomize.py` | startup patch: fills the embedding `index` Gemini omits (until the upstream fix ships) | ✅ |
-| `wiki/sync.sh` | git sync of the wiki's clone | ✅ |
-| `wiki/Caddyfile` | wiki-proxy: Authelia forward-auth, public icon and service-worker paths | ✅ |
-| `wiki/space/` | wiki settings (`CONFIG.md`) and style (`Library/wiki-style.md`), copied in on start | ✅ |
-| `wiki/icons/` | the wiki's favicon set | ✅ |
-| `bench/` | embedding-model comparison harness; corpus, queries and keys stay in gitignored `bench/.data/` and `bench/.env` | ✅ (code only) |
-| `.github/workflows/deploy.yml` | CD to the self-hosted runner | ✅ |
-
 ## First-time setup
 
 The full step-by-step recipe, from an empty GitHub account to agents connected, is in
