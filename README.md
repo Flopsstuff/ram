@@ -17,8 +17,9 @@ agents ─HTTPS─► Cloudflare edge ─► cloudflared ─┬─► markdown-v
 - **IdP domain:** `https://<AUTH_DOMAIN>` — Authelia login (used only during the OAuth flow)
 - **Vault repo:** `https://github.com/your-org/vault.git` (private, managed read-write)
 - **Auth:** multi-auth — static bearer (`Authorization: Bearer <token>`) **or** OAuth 2.1 (DCR + PKCE)
-- **Transport:** streamable HTTP · **Embeddings:** local FastEmbed, multilingual
-  (`paraphrase-multilingual-mpnet-base-v2`; weights cached on the `fastembed-cache` volume)
+- **Transport:** streamable HTTP · **Embeddings:** `gemini-embedding-2` through Google AI Studio's
+  OpenAI-compatible endpoint, with note title and heading context (`EMBED_CONTEXT=true`). Chosen
+  with `bench/`; needs the startup patch in `patches/`.
 
 ## Files
 
@@ -29,6 +30,8 @@ agents ─HTTPS─► Cloudflare edge ─► cloudflared ─┬─► markdown-v
 | `cloudflared/config.yml.example` / `.yml` | tunnel ingress template / **real** (tunnel ID + hostnames) | ✅ / 🚫 |
 | `authelia/configuration.yml.example` / `.yml` | Authelia+OIDC template / **real** (secrets, JWKS, client) | ✅ / 🚫 |
 | `authelia/users_database.yml.example` / `.yml` | allowlist template / **real** (user + password hash) | ✅ / 🚫 |
+| `patches/sitecustomize.py` | startup patch: fills the embedding `index` Gemini omits (until the upstream fix ships) | ✅ |
+| `bench/` | embedding-model comparison harness; real corpus, queries and keys stay in gitignored `bench/.data/` and `bench/.env` | ✅ (code only) |
 
 cloudflared routes two hostnames through one tunnel via `cloudflared/config.yml` ingress
 rules (`<MCP_DOMAIN> → markdown-vault-mcp:8000`, `<AUTH_DOMAIN> → authelia:9091`). Tunnel credentials

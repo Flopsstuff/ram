@@ -49,17 +49,16 @@ services:
       - export MARKDOWN_VAULT_MCP_INSTRUCTIONS="$$(cat /etc/ram/instructions.md)"; exec markdown-vault-mcp serve --transport http --host 0.0.0.0 --port 8000
     env_file:
       - .env
+    environment:
+      PYTHONPATH: /etc/ram/patches   # loads patches/sitecustomize.py (see the mount below)
     volumes:
       - vault-data:/vault                              # git-managed vault clone (persistent)
       - app-data:/data                                 # FTS index + embeddings + session state (NOT in git)
-      # FastEmbed model weights. Without MARKDOWN_VAULT_MCP_FASTEMBED_CACHE_DIR
-      # fastembed caches in the container's /tmp, so every recreate (= every
-      # deploy) re-downloaded the model — ~1 GB for the multilingual one. Its own
-      # volume keeps it out of app-data (wipeable on its own, never mixed with
-      # index state). Mounted at /data/state/fastembed, the path upstream
-      # documents, because the stock entrypoint already chowns /data/state/* —
-      # so a fresh root-owned volume needs no extra fix in the wrapper above.
-      - fastembed-cache:/data/state/fastembed
+      # Startup patch (patches/sitecustomize.py, imported by Python at start via
+      # PYTHONPATH): fills the `index` Gemini's OpenAI-compat endpoint omits on
+      # the first embedding, without which batch indexing dies with TypeError.
+      # Remove both lines once the upstream fix ships.
+      - ./patches:/etc/ram/patches:ro
       - ./instructions.md:/etc/ram/instructions.md:ro  # editable server instructions
     networks:
       - brain
@@ -109,5 +108,4 @@ networks:
 volumes:
   vault-data:
   app-data:
-  fastembed-cache: # FastEmbed model weights (re-downloadable; kept to avoid a ~1 GB fetch per deploy)
   authelia-data:   # Authelia SQLite + notifications (must persist across CD git clean)
