@@ -206,7 +206,11 @@ def schedule() -> None:
     parsed = _parse_at(at)
     if parsed is None:
         _idle(f"OKF_MAINTENANCE_AT='{at}' is not HH:MM")
-    retry = int(os.environ.get("OKF_MAINTENANCE_RETRY_S", "600"))
+    retry_raw = os.environ.get("OKF_MAINTENANCE_RETRY_S", "").strip() or "600"
+    if not retry_raw.isdigit():
+        _log(f"OKF_MAINTENANCE_RETRY_S='{retry_raw}' is not a number of seconds; using 600")
+        retry_raw = "600"
+    retry = int(retry_raw)
 
     while True:
         target = _next_run(*parsed, time.time())

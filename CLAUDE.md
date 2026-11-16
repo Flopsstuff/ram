@@ -248,7 +248,9 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     all: a deploy may be recreating the server at that moment. (The old workflow sat in the
     `ram-deploy` queue for the same reason.)
   - **It gets only the variables it reads**, through `environment:` interpolation from `.env`,
-    not the whole `env_file`: the bearer, the OKF mode, the schedule and `TZ`.
+    not the whole `env_file`: the bearer, the OKF mode, the schedule, `TZ` and the retry
+    pause (`OKF_MAINTENANCE_RETRY_S`, default 600; not in `.env.example`, few need it). A
+    variable the script reads has to be listed there, or `.env` cannot set it.
   - **The image's healthcheck is disabled** here: it probes a server on localhost.
   - It idles, with one log line saying why, when `MARKDOWN_VAULT_MCP_OKF_MODE` is `off`, the
     bearer is missing, or the time is not `HH:MM`. A server without OKF tools makes a run a
