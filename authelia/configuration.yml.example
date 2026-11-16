@@ -12,7 +12,10 @@
 theme: 'dark'
 
 server:
-  address: 'tcp://:9091/'
+  # The path is the prefix Authelia lives under on the public hostname:
+  # proxy/nginx.conf sends /sso/ here. With it the portal is
+  # https://<DOMAIN>/sso/ and the OIDC issuer is https://<DOMAIN>/sso.
+  address: 'tcp://:9091/sso'
 
 log:
   level: 'info'
@@ -25,15 +28,18 @@ authentication_backend:
       algorithm: 'argon2'
 
 access_control:
-  default_policy: 'one_factor'   # wiki forward-auth + OIDC; single-user DB is the allowlist
+  default_policy: 'one_factor'   # the wiki's login check + OIDC; the user file is the allowlist
 
 session:
-  name: 'authelia_session'
+  # A name of our own, not the default `authelia_session`: when the
+  # hostname changes, a browser's stale cookie keeps the old name and is
+  # ignored instead of shadowing the fresh one (which would loop the login).
+  name: 'ram_session'
   secret: '<RAND_SESSION_SECRET>'
   cookies:
-    - domain: '<COOKIE_DOMAIN>'                 # parent domain of <AUTH_DOMAIN>
-      authelia_url: 'https://<AUTH_DOMAIN>'
-      default_redirection_url: 'https://<MCP_DOMAIN>'
+    - domain: '<DOMAIN>'                        # the one public hostname
+      authelia_url: 'https://<DOMAIN>/sso'
+      default_redirection_url: 'https://<DOMAIN>/wiki/'
 
 storage:
   encryption_key: '<RAND_STORAGE_ENCRYPTION_KEY>'   # >= 20 chars
@@ -78,12 +84,12 @@ identity_providers:
         require_pkce: true
         lifespan: 'mcp_long_lived'
         redirect_uris:
-          - 'https://<MCP_DOMAIN>/auth/callback'
-        # RFC 8707 Resource Indicators: MCP clients send `resource=https://<MCP_DOMAIN>/mcp`.
+          - 'https://<DOMAIN>/auth/callback'
+        # RFC 8707 Resource Indicators: MCP clients send `resource=https://<DOMAIN>/mcp`.
         # Authelia rejects (invalid_target) any resource not whitelisted here.
         audience:
-          - 'https://<MCP_DOMAIN>'
-          - 'https://<MCP_DOMAIN>/mcp'
+          - 'https://<DOMAIN>'
+          - 'https://<DOMAIN>/mcp'
         scopes: ['openid', 'email', 'profile', 'offline_access']
         grant_types: ['authorization_code', 'refresh_token']
         response_types: ['code']

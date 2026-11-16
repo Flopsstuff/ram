@@ -19,11 +19,13 @@ independent, optional add-ons chosen in `.env` (see "Storage modes" under Archit
 The **Design rationale** section of `README.md` records the "why" behind the fixed decisions
 and the alternatives that were considered and dropped. (This rationale used to live in a local
 `plan.md`, now removed.) Where any older design note and the committed files disagree, the
-committed files win. Two things an earlier draft got wrong: cloudflared is **no longer
-single-origin** — it now routes two hostnames via a mounted `cloudflared/config.yml` ingress
-file (credentials stay env-driven); and auth is **no longer bearer-only** — it is multi-auth
-(bearer + OAuth via Authelia). The OAuth migration is planned in the vault at
-`projects/ram/oauth-authelia-plan.md`.
+committed files win. Two things older notes get wrong: cloudflared is **single-origin again** —
+the stack has **one public hostname**, `<DOMAIN>`, the tunnel hands every request to one nginx
+(`proxy`), and nginx routes by path (`/wiki/` → the wiki, `/sso/` → Authelia, the rest → the
+MCP server). The three hostnames, the mounted `cloudflared/config.yml` ingress file that split
+them and the Caddy container in front of the wiki are gone; and auth is **no longer
+bearer-only** — it is multi-auth (bearer + OAuth via Authelia). The OAuth migration is planned
+in the vault at `projects/ram/oauth-authelia-plan.md`.
 
 ## Operating commands
 
@@ -33,10 +35,12 @@ docker compose logs -f markdown-vault-mcp    # watch clone + FTS index build; re
 docker compose down                          # stop (named volumes persist)
 docker compose down -v                       # ALSO wipe vault-data + app-data + authelia-data + wiki-data (destructive)
 
-curl -i https://<MCP_DOMAIN>/mcp                                    # expect 401 + WWW-Authenticate (no token)
-curl -i https://<MCP_DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>" # bearer path: expect an MCP response
-curl -sI https://<AUTH_DOMAIN>/.well-known/openid-configuration         # Authelia up: 200
-curl -sI https://<MCP_DOMAIN>/.well-known/oauth-authorization-server    # OIDC/multi-auth on: 200
+curl -i https://<DOMAIN>/mcp                                     # expect 401 + WWW-Authenticate (no token)
+curl -i https://<DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"  # bearer path: expect an MCP response
+curl -sI https://<DOMAIN>/sso/.well-known/openid-configuration   # Authelia up, under /sso: 200
+curl -sI https://<DOMAIN>/.well-known/oauth-authorization-server # OIDC/multi-auth on: 200
+curl -sI https://<DOMAIN>/                                       # proxy up: 302 to /wiki/
+curl -sI https://<DOMAIN>/wiki/                                  # no session: 302 to the portal, /sso/?rd=…
 ```
 
 **The stack must work from `docker compose up -d` alone**: someone fills in the config files
@@ -47,13 +51,26 @@ optional layer on top, and this production instance uses it.
 CI/CD (optional): `.github/workflows/deploy.yml` deploys to a self-hosted runner on push to `main` (and a
 weekly image-refresh cron), materializing every gitignored config from a GitHub secret first
 (see Configuration). "Verification" means the curls above, plus a headless agent connecting with
-the bearer (`claude mcp add -t http -s user brain https://<MCP_DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"`),
-plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Auth = OAuth → log in at `<AUTH_DOMAIN>`).
+the bearer (`claude mcp add -t http -s user brain https://<DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"`),
+plus a GUI client completing the OAuth flow (add `https://<DOMAIN>/mcp`, Auth = OAuth → log in at
+the portal, `https://<DOMAIN>/sso/`), plus the wiki opening at `https://<DOMAIN>/wiki/` after
+that same login.
 
 ## Architecture
 
-Eight services in `docker-compose.yml` (compose project `ram-brain`): the MCP stack (the first
-three), the browser wiki (the next three), the optional bucket mirror and the OKF upkeep.
+Eight services in `docker-compose.yml` (compose project `ram-brain`): the MCP server, the
+tunnel, the path-routing proxy, Authelia, the browser wiki (two services), the optional bucket
+mirror and the OKF upkeep.
+
+**One hostname, routed by path.** Everything public is under `<DOMAIN>`; `proxy` (nginx) decides
+by path:
+
+| Path | Goes to | Login |
+| --- | --- | --- |
+| `/mcp`, `/authorize`, `/token`, `/register`, `/auth/callback`, `/.well-known/...`, `/transfer/...` (upload/download links), `/health` and everything else at the root | `markdown-vault-mcp` | bearer or OAuth, enforced by the server |
+| `/wiki/` | `wiki` (SilverBullet, `SB_URL_PREFIX=/wiki`) | Authelia session, checked by nginx `auth_request` |
+| `/sso/` | `authelia`: login portal + OIDC provider | — |
+| exactly `/` | 302 to `/wiki/` | — |
 
 **Storage modes.** All four are set in `.env`; nothing in `docker-compose.yml` changes between
 them. The switch for git is `MARKDOWN_VAULT_MCP_GIT_REPO_URL` (read by the server, `wiki-sync`
@@ -67,7 +84,8 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
 | Git + bucket | both blocks, `WIKI_VOLUME` unset | its own clone on `wiki-data` | `git clone`; the bucket is a second copy, never restored from |
 
 - **`markdown-vault-mcp`** — the server (`serve --transport http --host 0.0.0.0 --port 8000`).
-  Deliberately **no `ports:`** — the only ingress is through cloudflared. Two volumes:
+  Deliberately **no `ports:`** — the only ingress is through cloudflared and `proxy`. It owns
+  the **root of the hostname**: `proxy` sends it every path no other location claims. Two volumes:
   `vault-data → /vault` (the vault: a git-managed clone with git, a plain folder without;
   initially empty) and `app-data → /data`
   (FTS index + embeddings + HTTP session KV). Keeping `/data` out of `/vault` is
@@ -96,22 +114,130 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     dies. Single-query search would still work, which hides the failure. It is a no-op for
     responses that carry every index. Remove the file, the mount and `PYTHONPATH` once the
     upstream fix (`index or 0`) ships in a release.
-- **`cloudflared`** — the tunnel. Credentials are still env-driven (`command: tunnel run
-  ${CF_TUNNEL_ID}` + `TUNNEL_CRED_CONTENTS` inlined), but ingress is now a **mounted
-  `cloudflared/config.yml`** (`--config /etc/cloudflared/config.yml`, `:ro`), because two
-  public hostnames share this one tunnel and a single `TUNNEL_URL` origin can't split them.
-  The file has host→service rules: `<MCP_DOMAIN> → markdown-vault-mcp:8000` and
-  `<AUTH_DOMAIN> → authelia:9091`, plus a `http_status:404` catch-all. Both hostnames are
-  DNS-routed (`cloudflared tunnel route dns`) to the same tunnel; the real hostnames + tunnel
-  ID live only in the gitignored `config.yml`, not in committed files.
-- **`authelia`** — the OIDC identity provider for the OAuth login path, reachable only through
-  cloudflared at `<AUTH_DOMAIN>` (**no `ports:`**). Runs as root. Config is mounted read-only
+- **`cloudflared`** — the tunnel, **single-origin and configured from the environment alone**:
+  `command: tunnel --no-autoupdate run ${CF_TUNNEL_ID}`, `TUNNEL_CRED_CONTENTS` inlined, and
+  `TUNNEL_URL=http://proxy:80` set in compose. There is no `--config`, no mounted file and no
+  ingress rules: one hostname has one origin, and the split by path happens in `proxy`. (It
+  used to mount a `cloudflared/config.yml` with a rule per hostname; that file, its template
+  and its GitHub secret no longer exist.) The hostname is DNS-routed to the tunnel once
+  (`cloudflared tunnel route dns <tunnel> <DOMAIN>`). The real name lives in Cloudflare DNS, in
+  `.env` and in `authelia/configuration.yml`, never in compose or any committed file. `cloudflared/` is
+  gitignored as a whole: it is where the output of `cloudflared tunnel create` tends to be
+  kept.
+- **`proxy`** — `nginx:stable-alpine` with `proxy/nginx.conf` mounted `:ro` at
+  `/etc/nginx/conf.d/default.conf` (so the whole file sits inside nginx's `http` block), and
+  `wiki/icons/` mounted `:ro` at `/srv/icons`. **No `ports:`**; it is the only thing cloudflared
+  talks to, and the only way to `authelia` and `wiki`. It replaced a Caddy container
+  (`wiki-proxy`) that stood in front of the wiki alone. Routing is the table above. Non-obvious
+  knobs:
+  - **The MCP server keeps the root** (`location /`), because MCP clients look for the OAuth
+    metadata at the root of the host. Every other app gets its own prefix here; a planned admin
+    panel would go under `/admin/`. A prefix must not collide with a path the server serves:
+    `/auth` is taken by `/auth/callback`.
+  - **Paths are passed through unchanged**: nothing strips `/sso` or `/wiki`. Each backend
+    knows its own prefix instead: Authelia from the path in `server.address`, SilverBullet from
+    `SB_URL_PREFIX`.
+  - **No hostname in the file** (`listen 80 default_server`, `server_name _`): it answers for
+    whatever host the tunnel sends and passes that `Host` on.
+  - **Backend names are resolved at request time**: `resolver 127.0.0.11` (Docker's DNS) plus
+    variables in `proxy_pass` (`set $mcp …`, `$authelia`, `$wiki`). With the names written
+    straight into `proxy_pass`, nginx resolves them once at start: it would refuse to start
+    while a backend is still coming up, and keep a dead address after a backend is recreated,
+    which a deploy does to `authelia` and the server.
+  - **`absolute_redirect off`**: nginx's own redirects (`/` → `/wiki/`, `/sso` → `/sso/`,
+    `/wiki` → `/wiki/`) are sent as paths. An absolute one would carry `http://`, the scheme of
+    this hop.
+  - **Request bodies: `client_max_body_size 8m`, and `100m` under `/transfer/` only.** The
+    MCP endpoint itself refuses more than 4 MiB; `/transfer/` is the server's upload and
+    download links (`create_upload_link` / `create_download_link`, the token in the path is
+    the credential), where the server takes up to 100 MiB, as does Cloudflare. The small cap
+    is there for `/register`: it is public and has no limit of its own.
+  - **`proxy_redirect http://$http_host/ /` turns the server's redirects to itself into
+    paths.** The server builds its few such redirects (a trailing slash: `/mcp/` → `/mcp`)
+    from the scheme it was called with, `http` on this hop; it trusts forwarded headers from
+    localhost only. The rule must match this host and nothing else: the OAuth flow ends in a
+    redirect to the client's own address, often `http://127.0.0.1:<port>/…`, and a rule that
+    rewrote every `http://` Location turned that into a path and broke every login.
+  - **No `depends_on`.** nginx has to be up before the MCP server, not after it: the server
+    reads Authelia's OIDC discovery through the public URL when it starts (a failure exits it,
+    and the restart policy retries), which needs the tunnel and this proxy. Depending on
+    `wiki` would also make that wait for the wiki's clone.
+  - **The server's routes, all exact paths**: `/mcp`, `/authorize`, `/token`, `/register`,
+    `/revoke`, `/consent`, `/auth/callback`, `/health`, `/health/ready`,
+    `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`
+    and `/transfer/<token>`. It answers 404 for `/` and for anything under `/wiki`, `/sso` or
+    `/admin`. Root `/.well-known/` must never be sent to Authelia: its discovery belongs at
+    `/sso/.well-known/openid-configuration` only.
+  - **The MCP location turns buffering off** (`proxy_buffering`, `proxy_request_buffering`) and
+    sets read and send timeouts to **1 h**. The server's answers are streams (streamable HTTP,
+    SSE): buffered, they would reach the client late or never, and an open stream may stay
+    silent far longer than nginx's default 60 s.
+  - **`X-Forwarded-Proto: https`** goes to every backend, with `Host` and `X-Forwarded-Host`:
+    TLS ends at Cloudflare and this hop is plain HTTP, so each backend has to be told the
+    public scheme; Authelia needs it to match the cookie and build the login redirect. A
+    `proxy_set_header` inside a location replaces the whole set inherited from the `server`
+    block, so the `/wiki/` location repeats it, and `/internal/authz` sets its own: there the
+    public scheme travels in `X-Original-URL`. Keep that in mind when adding a header to one
+    location.
+  - **The wiki's login is `auth_request`.** Every `/wiki/` request first goes, as a subrequest
+    through the `internal` location `/internal/authz`, to Authelia's
+    `/api/authz/auth-request`, without the body and with the public address in
+    `X-Original-URL` (`https://…`) and the method in `X-Original-Method`. A session passes, and
+    the `Remote-User`/`-Groups`/`-Email`/`-Name` headers Authelia answers with are handed to
+    SilverBullet. Otherwise Authelia answers 401 with the portal's address in `Location`, and
+    `error_page 401 =302` turns that into the redirect to `https://<DOMAIN>/sso/?rd=…`.
+  - **Two exceptions under `/wiki/` skip the login**, both static files with nothing from the
+    vault: the favicon/manifest-icon files (`/wiki/.client/favicon.svg` and the like), served
+    by nginx itself from `wiki/icons/` in place of SilverBullet's own, and
+    **`/wiki/service_worker.js`**. Browsers refuse to register a service worker whose script
+    answers with a redirect, and that request would get Authelia's login redirect, which broke
+    SilverBullet's offline cache with an error banner on every load. The service worker's scope
+    and the web manifest's scope are `/wiki/`, so it never sees a request for `/mcp` or `/sso`.
+    That location names the upstream path in full (`proxy_pass $wiki/wiki/service_worker.js`),
+    so SilverBullet is asked for this one file however the request line was spelled.
+  - **A `..` path segment is refused in any encoding** (`..`, `%2e%2e`, bounded by a slash,
+    `%2f`, `%5c`, the ends or a `?`) → 400. nginx picks the location from the decoded,
+    normalised path but hands the backend the path as it was sent, so `/wiki/x/..%2fservice_worker.js`
+    matched the public service-worker location while the backend got a different path — the way
+    the login and the `/.proxy`/`.shell` blocks below were slipped on the stand. A lone encoded
+    slash is left alone: SilverBullet uses `%2F` in a note path under `/.revisions/`, and no
+    path here needs a `..` segment.
+  - **Two SilverBullet endpoints answer 403 for everybody**, logged in or not, because a
+    script in a note runs with the reader's session (both `^~` prefix matches, so no trailing
+    trick reaches them): `/wiki/.shell` (runs a command in the wiki's container; also off in
+    SilverBullet itself via `SB_SHELL_BACKEND`, see `wiki`) and `/wiki/.proxy` (makes
+    SilverBullet fetch any URL, which from inside the compose network reaches the other
+    containers and the host's network). The price of the second: SilverBullet cannot install
+    a library from a URL; the wiki's settings come from `wiki/space/` anyway.
+  - **Rate limits per client address** (`limit_req`, answer 429): 30 r/s for everything, with
+    a burst of 100 on the MCP side, 300 on `/wiki/` (the first load syncs every note) and 50
+    on `/sso/`; 10 per minute, burst 5, on the login and second-factor endpoints and on
+    `/register`, which is public and writes to the server's store. The key is the address in
+    Cloudflare's `CF-Connecting-IP` (`real_ip_header`, trusted from the private ranges only):
+    every request arrives from cloudflared, so without it all clients would share one limit.
+    `okf-maintenance` talks to the server directly and is not limited.
+  - **`/wiki/` raises the body cap to 100m** for attachment uploads; the 8m default is for the
+    MCP side. `/internal/authz` lifts the cap altogether (`client_max_body_size 0`): the login
+    subrequest is checked against the caller's Content-Length, and under the 8m default an
+    upload above it failed there, as a 500. The access log uses a format without the query string, and `/transfer/` turns its
+    log off, so an OAuth `code` or a capability token stays out of nginx's log.
+- **`authelia`** — the OIDC identity provider for the OAuth login path and the login in front
+  of the wiki, reachable only through `proxy` under `/sso/` (**no `ports:`**). Runs as root.
+  Config is mounted read-only
   (`./authelia/configuration.yml`, `./authelia/users_database.yml`); all mutable state (SQLite
   + notifications) is on the **`authelia-data` named volume** at `/var/lib/authelia` so the CD
   runner's `git clean` can't wipe it. The single user in `users_database.yml` **is** the
   allowlist (deny-by-default). Token lifespans are ~1 year (`mcp_long_lived` profile;
   `id_token` must match `access_token`) because MCP clients don't reliably refresh.
-  Authelia also serves **forward-auth** (`/api/authz/forward-auth`) for the wiki; its
+  **`server.address: 'tcp://:9091/sso'`**: the path is the prefix Authelia is served under, so
+  the portal is `https://<DOMAIN>/sso/` and the OIDC issuer is `https://<DOMAIN>/sso`. The
+  session cookie's `domain` is **the hostname itself** (there is no parent domain to share any
+  more), with `authelia_url: https://<DOMAIN>/sso` and
+  `default_redirection_url: https://<DOMAIN>/wiki/`. **`session.name: 'ram_session'`**, not the
+  default `authelia_session`: moving from the old three-hostname layout, a browser keeps its
+  stale parent-domain cookie, and a matching name would shadow the fresh one and loop the login;
+  a new name is simply ignored.
+  Authelia also answers nginx's **`auth_request`** (`/api/authz/auth-request`) for the wiki; its
   `access_control.default_policy: one_factor` is what lets the logged-in user through there.
 - **`wiki-sync`** — `alpine/git` running `wiki/sync.sh` (mounted `:ro`) on `/data`, which is
   the volume named by `${WIKI_VOLUME:-wiki-data}`. The script has two branches, picked by
@@ -153,21 +279,15 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
   `${WIKI_VOLUME:-wiki-data}` as `wiki-sync`. Pinned
   because 3.0 moves `CONFIG.md` to `Library/Config.md` and runs `space-lua` only from `Library/`;
   bump it by hand and check `wiki/space/` still applies. **No auth of its own
-  and no `ports:`**: the only way in is `wiki-proxy`. `SB_INDEX_PAGE=README` because the vault
-  has no `index.md`. SilverBullet takes its UID from the owner of `/data`. With git that is
-  root (owner of the fresh `wiki-data` volume), same as `wiki-sync`, so files from either side
-  stay writable by both. On the shared volume it is 1000, the server's user, for the same
+  and no `ports:`**: the only way in is `proxy`, which lets in nobody without an Authelia
+  session. **`SB_URL_PREFIX=/wiki`**: it is served under that path, at
+  `https://<DOMAIN>/wiki/`, and `proxy` passes the path through unchanged. `SB_INDEX_PAGE=README`
+  because the vault has no `index.md`. **`SB_SHELL_BACKEND=off`**: by default SilverBullet runs
+  shell commands in its container for whoever is logged in, a script in a note included, and
+  nothing here needs that (`wiki-sync` does the git work). SilverBullet takes its UID from the owner of `/data`.
+  With git that is root (owner of the fresh `wiki-data` volume), same as `wiki-sync`, so files
+  from either side stay writable by both. On the shared volume it is 1000, the server's user, for the same
   reason: both write the same files.
-- **`wiki-proxy`** — Caddy with `wiki/Caddyfile` (mounted `:ro`): `forward_auth` to
-  `authelia:9091`, then `reverse_proxy wiki:3000`. Two exceptions skip the login, both static
-  files with nothing from the vault: the favicon/manifest-icon paths, served from `wiki/icons/`
-  (mounted `:ro`), and **`/service_worker.js`**. Browsers refuse to register a service worker
-  whose script answers with a redirect, and that request got Authelia's login redirect, which
-  broke SilverBullet's offline cache with an error banner on every load. Sets
-  `X-Forwarded-Proto: https` on the auth subrequest because TLS ends at Cloudflare and Authelia
-  needs the public scheme to match the cookie domain and build the redirect. Cloudflared routes
-  `<WIKI_DOMAIN>` here; the Authelia session cookie is on the parent domain, so one login covers
-  the portal and the wiki.
 - **`vault-mirror`** — `rclone/rclone:1.76` running `mirror/mirror.sh` (mounted `:ro`) on
   `vault-data`, **no `ports:`** (it only dials out). With `BUCKET_NAME` unset it reports healthy
   and idles; that is all production sees of it. With it set, every `BUCKET_SYNC_INTERVAL_S`
@@ -265,23 +385,30 @@ longer happens: the restart after the OKF migration, which had edited all 116 no
 reported `0 added, 0 modified` and re-embedded nothing. If a restart ever shows a large `added`
 count again, this is where to look; the `cpus` cap is the guard.
 
-Data flow: `agents ─HTTPS→ Cloudflare edge → cloudflared →` either `markdown-vault-mcp →
-/vault + /data` (MCP traffic) or `→ authelia` (the browser leg of the OAuth flow). The
-wiki, with git: `browser → cloudflared → wiki-proxy → (authelia forward-auth) → wiki → wiki-data`,
+Data flow: `agents ─HTTPS→ Cloudflare edge → cloudflared → proxy →` either
+`markdown-vault-mcp → /vault + /data` (MCP traffic: everything outside `/wiki/` and `/sso/`) or
+`→ authelia` (`/sso/`: the portal and the browser leg of the OAuth flow). The wiki, with git:
+`browser → cloudflared → proxy → (auth_request to authelia) → wiki → wiki-data`,
 with `wiki-sync` moving its edits through the vault repo to the server's next pull. The wiki,
 without git: the same path ends in `wiki → vault-data`, the server's own folder, and the
 server's file watcher indexes the edit. The bucket: `vault-data → vault-mirror → bucket`, and
 back only as a restore onto an empty volume without git.
 TLS terminates at the edge; inside the network it's plain HTTP. **Auth is enforced by the
 MCP server — bearer token OR its own OIDC proxy (which delegates login to Authelia) — not by
-Cloudflare Access.**
+Cloudflare Access.** The wiki has no auth of its own: `proxy` asks Authelia about every request
+to it.
 
 ## Configuration
 
 Configuration lives in three gitignored files, each with a committed `*.example` template:
-`.env`, `cloudflared/config.yml`, and `authelia/configuration.yml` (+ `authelia/users_database.yml`).
+`.env`, `authelia/configuration.yml` and `authelia/users_database.yml`. The tunnel has no file
+of its own: its two values are in `.env`, and its origin is fixed in compose. The real hostname
+is written in two of them, `.env` and `authelia/configuration.yml`; `proxy/nginx.conf` and
+`docker-compose.yml` are committed and carry none.
 
-`.env` (all app vars are `MARKDOWN_VAULT_MCP_*`): core vault paths, **`EXCLUDE`** (besides
+`.env` (all app vars are `MARKDOWN_VAULT_MCP_*`): core vault paths, `BASE_URL=https://<DOMAIN>`
+(the root of the hostname, no path; the OAuth redirect URI is `BASE_URL` + `/auth/callback`),
+**`EXCLUDE`** (besides
 `.obsidian/**`, `.trash/**` and `.git/**` it lists SilverBullet's own files: `CONFIG.md`,
 `Library/**`, `_plug/**`, `.silverbullet*`. Without git the wiki keeps them in the server's
 folder, and this is the only thing that hides them from agents and the index; with git they
@@ -300,7 +427,7 @@ vault note, `reference/okf/SPEC.md`, so MCP-only agents can `read` it: every not
 lives in `state`, `index.md`/`log.md` are reserved. `on` adds ~205 units to the instructions, so
 `INSTRUCTIONS_EXTRA` must stay around 600 units to keep the total under 2,048. `OKF_WRITE` stays
 off: it re-serialises the whole frontmatter on every edit),
-the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<AUTH_DOMAIN>/.well-known/openid-configuration`,
+the `BEARER_TOKEN`, the **OIDC block** (`OIDC_CONFIG_URL` = `https://<DOMAIN>/sso/.well-known/openid-configuration`,
 `OIDC_CLIENT_ID=ram-brain`, `OIDC_CLIENT_SECRET` = *plaintext* whose pbkdf2 hash is in Authelia's
 config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,email`), the
 **storage block** (below), and the
@@ -327,21 +454,52 @@ The storage block picks the mode (table under Architecture). Its variables:
   `BUCKET_SYNC_INTERVAL_S` (300), `BUCKET_HISTORY_DAYS` (30). They all ride in the `DOTENV`
   secret; the bucket needs no config file, no new secret and no materialize step.
 
-The Authelia/cloudflared config files carry secrets **and** the real hostnames, so they are
-gitignored too. Generate Authelia secrets with the `authelia crypto …` subcommands (see README);
+The Authelia config files carry secrets **and** the real hostname, so they are
+gitignored too. Generate Authelia secrets with the `authelia crypto …` subcommands (see
+`INSTALL.md`, step 2.2);
 the JWKS private key and the pbkdf2 client-secret hash are inlined into `configuration.yml`.
 
 When adding config, update **both** the committed `*.example` template (no real values) and the
 real gitignored file. **CD note:** `actions/checkout` runs `git clean`, wiping the gitignored
 files, so `deploy.yml` re-materializes each from a GitHub secret every run — `DOTENV → .env`,
-`CLOUDFLARED_CONFIG`, `AUTHELIA_CONFIG`, `AUTHELIA_USERS`. Adding a new config file means adding
+`AUTHELIA_CONFIG`, `AUTHELIA_USERS`. (There is no cloudflared secret any more: the tunnel is
+configured from `.env`.) Adding a new config file means adding
 a matching secret + a materialize step, or the runner won't have it. **After a config change you
 MUST update the corresponding secret AND redeploy** — editing the local file alone does nothing
 for the runner (it reads the secret, not git).
 
 ## Invariants — violating these breaks the deployment
 
-- **No `ports:` on any service.** Ingress is cloudflared-only, by design.
+- **No `ports:` on any service.** Ingress is cloudflared-only, by design, and behind it
+  `proxy`-only: no other service is an origin of the tunnel.
+- **The MCP server owns the root of the hostname; a prefix must not collide with its routes.**
+  MCP clients look for the OAuth metadata at the root of the host, so the server cannot move
+  under a prefix. Everything else gets a prefix of its own in `proxy/nginx.conf` (`/wiki/`,
+  `/sso/`, a future `/admin/`), and that prefix must not shadow a path the server serves:
+  `/mcp`, `/authorize`, `/token`, `/register`, `/auth/callback`, `/.well-known/…`,
+  `/transfer/…`, `/health`. `/auth` in particular is taken.
+- **The `/sso` and `/wiki` prefixes are each written in more than one file, and the copies must
+  agree.** `/sso`: `server.address` in `authelia/configuration.yml`, the `/sso/` locations in
+  `proxy/nginx.conf`, and `MARKDOWN_VAULT_MCP_OIDC_CONFIG_URL` in `.env` (plus `authelia_url`
+  in the session cookie block). `/wiki`: `SB_URL_PREFIX` in `docker-compose.yml` and the
+  `/wiki/` locations in `proxy/nginx.conf` (plus `default_redirection_url`). Two of these files
+  are gitignored, so a change of prefix also means new `DOTENV` / `AUTHELIA_CONFIG` secrets.
+- **`proxy/nginx.conf` carries no hostname.** It is committed and this repo is public; it
+  matches any host (`server_name _`) and its redirects are relative. The real name stays in
+  `.env`, `authelia/configuration.yml` and Cloudflare DNS.
+- **One hostname means one browser origin, and that is an accepted trade-off.** The wiki, the
+  login portal and the MCP OAuth endpoints share it. SilverBullet runs scripts found in notes,
+  and notes are written by agents, so a script in a note can reach `/sso/` and the OAuth
+  endpoints with the reader's session; separate hostnames used to prevent that. It was chosen
+  for a simpler install (one name, one DNS record, three config files) because the wiki is a
+  review tool for the owner and agents are told to treat notes as data. **A new browser-facing
+  app under a prefix inherits this**: it shares the origin with the wiki, so anything a note's
+  script can do in the reader's browser, it can do to that app too. A Content-Security-Policy
+  on `/wiki/` was tried in a real browser and not shipped: SilverBullet works under one, and it
+  blocks a script's direct requests to the other prefixes, but it holds only with the wiki's
+  service worker switched off and images from other sites blocked, and it never stops a
+  script from sending the tab itself to another address. If an app on this hostname must be
+  out of the wiki's reach, the wiki needs a hostname of its own.
 - **`/data` stays separate from `/vault`.** Index/embeddings/state must never enter git, or the
   bucket.
 - **`WIKI_VOLUME` must match the git setting**: unset (`wiki-data`) with `GIT_REPO_URL`,
@@ -369,7 +527,7 @@ for the runner (it reads the secret, not git).
 - **With git, the remote must be HTTPS.** SSH remotes are rejected at startup when a token is set;
   there is no SSH auth path. The fine-grained PAT must belong to the account that owns the
   repo (a fine-grained PAT can't reach a repo where it's only a collaborator).
-- **Never put Cloudflare Access in front of `<MCP_DOMAIN>` OR `<AUTH_DOMAIN>`** — it injects its
+- **Never put Cloudflare Access in front of `<DOMAIN>`**, on any path — it injects its
   own auth and breaks the bearer header for headless agents (the #1 "configured everything, still
   401") and the OAuth browser flow for GUI clients.
 - **`OIDC_JWT_SIGNING_KEY` must be stable across restarts.** If unset/rotated, FastMCP mints an
@@ -381,13 +539,15 @@ for the runner (it reads the secret, not git).
   CD's `git clean` wipes the bind-mounted config dir on every deploy.
 - **Config-mounted services must be force-recreated to reload.** `docker compose up -d` does NOT
   recreate a container when only a bind-mounted config FILE's contents change, so `deploy.yml`
-  force-recreates `authelia` + `cloudflared` after re-materializing their configs, and
-  `markdown-vault-mcp`, `wiki-proxy`, `wiki-sync`, `vault-mirror` + `okf-maintenance` for their
-  bind-mounted patch, Caddyfile, sync script, mirror script and upkeep script. A plain
+  force-recreates `authelia` after re-materializing its configs, and
+  `proxy`, `markdown-vault-mcp`, `wiki-sync`, `vault-mirror` + `okf-maintenance` for their
+  bind-mounted `nginx.conf`, patch, sync script, mirror script and upkeep script. A plain
   `up -d` (or editing the file on the host) silently keeps the stale in-memory config.
+  `cloudflared` is not in that list any more: its configuration is all env, which compose does
+  notice.
 - **OIDC client (`ram-brain`) must satisfy the MCP OAuth flow, or login half-works then fails:**
-  its `audience` whitelist must include the MCP resource (`https://<MCP_DOMAIN>` and
-  `https://<MCP_DOMAIN>/mcp`) — MCP clients send it as an RFC 8707 `resource` param and Authelia
+  its `audience` whitelist must include the MCP resource (`https://<DOMAIN>` and
+  `https://<DOMAIN>/mcp`) — MCP clients send it as an RFC 8707 `resource` param and Authelia
   returns `invalid_target` otherwise; and `token_endpoint_auth_method` must be
   `client_secret_basic` (FastMCP authenticates to the token endpoint with HTTP Basic) — else the
   code→token exchange fails with `invalid_client`.
@@ -401,8 +561,8 @@ for the runner (it reads the secret, not git).
 - **Never commit secrets, and never place a secret inside the vault** — with git the vault is
   pushed to `github.com/<owner>/<vault-repo>`, with a bucket it is copied there and old versions
   stay in `history/`, so anything under `/vault` leaves the host. The
-  real `.env`, `cloudflared/config.yml`, and `authelia/*.yml` are gitignored; only `*.example`
-  templates are committed.
+  real `.env` and `authelia/*.yml` are gitignored, as is the whole `cloudflared/` folder (tunnel
+  credential files); only `*.example` templates are committed.
 - With git, the file watcher auto-disables because `GIT_PULL_INTERVAL_S > 0`. That is expected —
   external changes arrive via periodic pull, not inotify. Not a bug. Without git the watcher is
   on, and it is the only thing that gets browser edits into the index.

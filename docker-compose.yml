@@ -3,10 +3,11 @@
 # See the "Design rationale" section of README.md for the full rationale.
 #
 #   markdown-vault-mcp : the MCP server (HTTP transport; managed git when configured)
-#   cloudflared        : Cloudflare Tunnel (Method B, locally-managed config)
-#   authelia           : OIDC provider for MCP OAuth + forward-auth for the wiki
-#   wiki, wiki-sync,
-#   wiki-proxy         : SilverBullet in the browser (own vault clone with git,
+#   cloudflared        : Cloudflare Tunnel; hands everything to `proxy`
+#   proxy              : nginx; one hostname, routed by path:
+#                        /wiki/ → wiki, /sso/ → authelia, the rest → the MCP server
+#   authelia           : OIDC provider for MCP OAuth + the login for the wiki
+#   wiki, wiki-sync    : SilverBullet in the browser (own vault clone with git,
 #                        the server's volume without)
 #   vault-mirror       : optional copy of the vault in an S3-compatible bucket
 #   okf-maintenance    : daily upkeep of the vault's OKF links and indexes
@@ -14,7 +15,8 @@
 # Storage modes, all set in .env (see .env.example): the vault-data volume
 # alone; plus a git remote; plus a bucket; or git and a bucket together.
 #
-# No container publishes ports to the host. The ONLY ingress is via cloudflared.
+# No container publishes ports to the host. The ONLY ingress is via cloudflared,
+# and behind it via proxy.
 
 name: ram-brain
 
@@ -138,29 +140,44 @@ services:
   cloudflared:
     image: cloudflare/cloudflared:latest
     restart: unless-stopped
-    # Three public hostnames share this one tunnel, so a single TUNNEL_URL
-    # origin no longer suffices — routing is done by ingress rules in
-    # ./cloudflared/config.yml (ram.* → mcp, auth.* → authelia,
-    # wiki.* → wiki-proxy). Credentials
-    # still come from the environment; only ingress moved into a file.
+    # One public hostname, one origin: every request goes to proxy (nginx),
+    # which routes by path. So there is no ingress file; the tunnel is set up
+    # from the environment alone:
     #   CF_TUNNEL_ID          which tunnel to run (.env), passed to `run <ID>`
     #   TUNNEL_CRED_CONTENTS  tunnel credentials JSON, inline (.env)
-    #   config.yml            per-hostname ingress (mounted; gitignored real file)
-    # The public hostnames live in Cloudflare DNS + config.yml, not in compose.
-    command: tunnel --no-autoupdate --config /etc/cloudflared/config.yml run ${CF_TUNNEL_ID:?set CF_TUNNEL_ID in .env}
+    #   TUNNEL_URL            the single origin
+    # The public hostname lives in Cloudflare DNS (`cloudflared tunnel route
+    # dns`), in .env and in authelia/configuration.yml, not in compose.
+    command: tunnel --no-autoupdate run ${CF_TUNNEL_ID:?set CF_TUNNEL_ID in .env}
     environment:
       TUNNEL_CRED_CONTENTS: ${TUNNEL_CRED_CONTENTS:?set TUNNEL_CRED_CONTENTS in .env}
-    volumes:
-      - ./cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      TUNNEL_URL: http://proxy:80
     depends_on:
-      - markdown-vault-mcp
-      - authelia
-      - wiki-proxy
+      - proxy
     networks:
       - brain
 
-  # OIDC identity provider for the OAuth (oidc-proxy) login path. Reachable only
-  # through cloudflared at <AUTH_DOMAIN> — no `ports:`. Config is mounted
+  # The one way in behind the tunnel: nginx, routing the single hostname by
+  # path (proxy/nginx.conf). /wiki/ goes to SilverBullet after Authelia has
+  # been asked about the request (auth_request), /sso/ to Authelia, exactly /
+  # redirects to the wiki, everything else is the MCP server.
+  proxy:
+    image: nginx:stable-alpine
+    restart: unless-stopped
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./wiki/icons:/srv/icons:ro          # our favicon set, served instead of SilverBullet's
+    # No depends_on: nginx looks its backends up at request time, so it can
+    # be up first. It has to be: the MCP server reads Authelia's OIDC
+    # discovery through the public URL at start, which needs the tunnel and
+    # this proxy, and would otherwise wait for the wiki's clone.
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+
+  # OIDC identity provider for the OAuth (oidc-proxy) login path, and the login
+  # in front of the wiki. Reachable only through proxy, under /sso/ — no
+  # `ports:`. Config is mounted
   # read-only; all mutable state (SQLite + notifications) is on the authelia-data
   # named volume so the CD runner's `git clean` can't wipe it.
   authelia:
@@ -172,10 +189,10 @@ services:
       - authelia-data:/var/lib/authelia
     networks:
       - brain
-    # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+    # NOTE: intentionally no `ports:` — reachable only through proxy.
 
-  # --- Wiki: browse and edit the vault in a browser at <WIKI_DOMAIN> ---
-  # cloudflared → wiki-proxy (Authelia forward-auth) → wiki (SilverBullet).
+  # --- Wiki: browse and edit the vault in a browser at https://<DOMAIN>/wiki/ ---
+  # cloudflared → proxy (asks Authelia) → wiki (SilverBullet).
   # WIKI_VOLUME in .env picks the folder the wiki works on:
   #   wiki-data (default, with git): its OWN clone of the vault, never the MCP
   #     server's /vault: a second writer in that working tree would block the
@@ -217,7 +234,7 @@ services:
       - brain
 
   # SilverBullet: the browser editor. No auth of its own: it is reachable only
-  # through wiki-proxy, which lets in nobody without an Authelia session.
+  # through proxy, which lets in nobody without an Authelia session.
   wiki:
     # Pinned: 3.0 is on the way and moves CONFIG.md to Library/Config.md and
     # runs space-lua only from Library/. Bump deliberately, after checking
@@ -226,6 +243,8 @@ services:
     restart: unless-stopped
     environment:
       SB_INDEX_PAGE: README     # the vault has no index.md; open its README
+      SB_URL_PREFIX: /wiki      # served under this path; proxy passes it through unchanged
+      SB_SHELL_BACKEND: "off"    # no server-side shell; proxy blocks it too
       SB_NAME: ram wiki         # app name in the web manifest (installed PWA)
     volumes:
       - ${WIKI_VOLUME:-wiki-data}:/data
@@ -234,23 +253,7 @@ services:
         condition: service_healthy
     networks:
       - brain
-    # NOTE: intentionally no `ports:` — reachable only through wiki-proxy.
-
-  # Caddy in front of the wiki: asks Authelia about every request
-  # (forward-auth) and proxies the allowed ones to SilverBullet. See
-  # wiki/Caddyfile.
-  wiki-proxy:
-    image: caddy:2-alpine
-    restart: unless-stopped
-    volumes:
-      - ./wiki/Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./wiki/icons:/srv/icons:ro          # our favicon set, served instead of SilverBullet's
-    depends_on:
-      - wiki
-      - authelia
-    networks:
-      - brain
-    # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+    # NOTE: intentionally no `ports:` — reachable only through proxy.
 
 networks:
   brain:
