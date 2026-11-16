@@ -175,54 +175,7 @@ images. The gitignored config files are rebuilt from GitHub secrets on every run
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  agents["AI agents<br/>bearer or OAuth"]
-  you["You, in a browser"]
-  edge["Cloudflare edge<br/>TLS"]
-  gemini["Google AI Studio<br/>gemini-embedding-2"]
-  repo[("GitHub, optional<br/>owner/vault-repo")]
-  bucket[("S3-compatible bucket<br/>optional")]
-
-  subgraph host["Docker host, compose project ram-brain"]
-    cfd["cloudflared"]
-    proxy["proxy, nginx<br/>one hostname, routed by path"]
-    mcp["markdown-vault-mcp<br/>/mcp and the root"]
-    auth["authelia<br/>/sso/"]
-    wiki["wiki, SilverBullet<br/>/wiki/"]
-    sync["wiki-sync"]
-    mirror["vault-mirror"]
-    okf["okf-maintenance"]
-    vault[("vault-data<br/>the vault")]
-    data[("app-data<br/>index + embeddings")]
-    wdata[("wiki-data<br/>wiki clone, with git")]
-  end
-
-  agents --> edge
-  you --> edge
-  edge --> cfd
-  cfd --> proxy
-  proxy --> mcp
-  proxy --> auth
-  proxy --> wiki
-  proxy -. "wiki request: logged in?" .-> auth
-  mcp -. "OIDC" .-> auth
-  mcp --- vault
-  mcp --- data
-  wiki --- wdata
-  sync --- wdata
-  wiki -. "without git" .- vault
-  mirror --- vault
-  okf -. "MCP, once a day" .-> mcp
-  mcp <-->|"embed"| gemini
-  mcp <-->|"commit, push, pull"| repo
-  sync <-->|"commit, push, pull"| repo
-  mirror -->|"mirror + history"| bucket
-  bucket -. "fills an empty volume, without git" .-> mirror
-
-  actions["GitHub Actions<br/>optional"] --> runner["self-hosted runner"]
-  runner -. "docker compose up" .-> host
-```
+![Agents and a browser reach one hostname through Cloudflare; nginx routes by path to the MCP server, Authelia and the wiki; the vault lives on a volume, with optional git and bucket copies](assets/architecture.jpg)
 
 ## Design rationale
 
