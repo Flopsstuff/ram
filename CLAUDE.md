@@ -193,6 +193,27 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     answers with a redirect, and that request would get Authelia's login redirect, which broke
     SilverBullet's offline cache with an error banner on every load. The service worker's scope
     and the web manifest's scope are `/wiki/`, so it never sees a request for `/mcp` or `/sso`.
+    That location names the upstream path in full (`proxy_pass $wiki/wiki/service_worker.js`),
+    so SilverBullet is asked for this one file however the request line was spelled.
+  - **A `..` path segment is refused in any encoding** (`..`, `%2e%2e`, bounded by a slash,
+    `%2f`, `%5c`, the ends or a `?`) → 400. nginx picks the location from the decoded,
+    normalised path but hands the backend the path as it was sent, so `/wiki/x/..%2fservice_worker.js`
+    matched the public service-worker location while the backend got a different path — the way
+    the login and the `/.proxy`/`.shell` blocks below were slipped on the stand. A lone encoded
+    slash is left alone: SilverBullet uses `%2F` in a note path under `/.revisions/`, and no
+    path here needs a `..` segment.
+  - **Two SilverBullet endpoints answer 403 for everybody**, logged in or not, because a
+    script in a note runs with the reader's session (both `^~` prefix matches, so no trailing
+    trick reaches them): `/wiki/.shell` (runs a command in the wiki's container; also off in
+    SilverBullet itself via `SB_SHELL_BACKEND`, see `wiki`) and `/wiki/.proxy` (makes
+    SilverBullet fetch any URL, which from inside the compose network reaches the other
+    containers and the host's network). The price of the second: SilverBullet cannot install
+    a library from a URL; the wiki's settings come from `wiki/space/` anyway.
+  - **`/wiki/` raises the body cap to 100m** for attachment uploads; the 8m default is for the
+    MCP side. `/internal/authz` lifts the cap altogether (`client_max_body_size 0`): the login
+    subrequest is checked against the caller's Content-Length, and under the 8m default an
+    upload above it failed there, as a 500. The access log uses a format without the query string, and `/transfer/` turns its
+    log off, so an OAuth `code` or a capability token stays out of nginx's log.
 - **`authelia`** — the OIDC identity provider for the OAuth login path and the login in front
   of the wiki, reachable only through `proxy` under `/sso/` (**no `ports:`**). Runs as root.
   Config is mounted read-only
@@ -205,7 +226,10 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
   the portal is `https://<DOMAIN>/sso/` and the OIDC issuer is `https://<DOMAIN>/sso`. The
   session cookie's `domain` is **the hostname itself** (there is no parent domain to share any
   more), with `authelia_url: https://<DOMAIN>/sso` and
-  `default_redirection_url: https://<DOMAIN>/wiki/`.
+  `default_redirection_url: https://<DOMAIN>/wiki/`. **`session.name: 'ram_session'`**, not the
+  default `authelia_session`: moving from the old three-hostname layout, a browser keeps its
+  stale parent-domain cookie, and a matching name would shadow the fresh one and loop the login;
+  a new name is simply ignored.
   Authelia also answers nginx's **`auth_request`** (`/api/authz/auth-request`) for the wiki; its
   `access_control.default_policy: one_factor` is what lets the logged-in user through there.
 - **`wiki-sync`** — `alpine/git` running `wiki/sync.sh` (mounted `:ro`) on `/data`, which is
@@ -251,7 +275,9 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
   and no `ports:`**: the only way in is `proxy`, which lets in nobody without an Authelia
   session. **`SB_URL_PREFIX=/wiki`**: it is served under that path, at
   `https://<DOMAIN>/wiki/`, and `proxy` passes the path through unchanged. `SB_INDEX_PAGE=README`
-  because the vault has no `index.md`. SilverBullet takes its UID from the owner of `/data`.
+  because the vault has no `index.md`. **`SB_SHELL_BACKEND=off`**: by default SilverBullet runs
+  shell commands in its container for whoever is logged in, a script in a note included, and
+  nothing here needs that (`wiki-sync` does the git work). SilverBullet takes its UID from the owner of `/data`.
   With git that is root (owner of the fresh `wiki-data` volume), same as `wiki-sync`, so files
   from either side stay writable by both. On the shared volume it is 1000, the server's user, for the same
   reason: both write the same files.
@@ -461,7 +487,12 @@ for the runner (it reads the secret, not git).
   for a simpler install (one name, one DNS record, three config files) because the wiki is a
   review tool for the owner and agents are told to treat notes as data. **A new browser-facing
   app under a prefix inherits this**: it shares the origin with the wiki, so anything a note's
-  script can do in the reader's browser, it can do to that app too.
+  script can do in the reader's browser, it can do to that app too. A Content-Security-Policy
+  on `/wiki/` was tried in a real browser and not shipped: SilverBullet works under one, and it
+  blocks a script's direct requests to the other prefixes, but it holds only with the wiki's
+  service worker switched off and images from other sites blocked, and it never stops a
+  script from sending the tab itself to another address. If an app on this hostname must be
+  out of the wiki's reach, the wiki needs a hostname of its own.
 - **`/data` stays separate from `/vault`.** Index/embeddings/state must never enter git, or the
   bucket.
 - **`WIKI_VOLUME` must match the git setting**: unset (`wiki-data`) with `GIT_REPO_URL`,

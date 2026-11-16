@@ -31,7 +31,10 @@ access_control:
   default_policy: 'one_factor'   # the wiki's login check + OIDC; the user file is the allowlist
 
 session:
-  name: 'authelia_session'
+  # A name of our own, not the default `authelia_session`: when the
+  # hostname changes, a browser's stale cookie keeps the old name and is
+  # ignored instead of shadowing the fresh one (which would loop the login).
+  name: 'ram_session'
   secret: '<RAND_SESSION_SECRET>'
   cookies:
     - domain: '<DOMAIN>'                        # the one public hostname

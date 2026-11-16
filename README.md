@@ -241,7 +241,9 @@ flowchart LR
   OAuth endpoints share it. SilverBullet runs scripts found in notes, and notes are written by
   agents, so a script in a note can reach `/sso/` and the OAuth endpoints with the reader's
   session. Separate hostnames used to prevent that. The simpler install was chosen anyway: the
-  wiki is a review tool for the owner, and agents are told to treat notes as data.
+  wiki is a review tool for the owner, and agents are told to treat notes as data. What a
+  script would gain beyond the browser is switched off: SilverBullet's shell and its fetch-any-URL
+  proxy answer nobody.
 - **A remote embedding model.** Gemini ranks paraphrased Russian questions far better than the
   local models we tried, and re-embedding costs API calls instead of the host's CPU.
 - **With git, the wiki writes through git, never into the server's folder.** The server stays

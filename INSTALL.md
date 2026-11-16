@@ -426,3 +426,6 @@ What to expect afterwards:
 - **Bearer agents** keep working if `<DOMAIN>` is the old MCP hostname. Otherwise give them the
   new address.
 - **The wiki moves** to `https://<DOMAIN>/wiki/`. An installed PWA has to be reinstalled.
+- **No login loop from a stale cookie**: the session cookie is renamed (`session.name:
+  'ram_session'` in `authelia/configuration.yml`), so a browser's old parent-domain cookie is
+  ignored rather than shadowing the new one. Keep that rename when you edit the config.

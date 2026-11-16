@@ -244,6 +244,7 @@ services:
     environment:
       SB_INDEX_PAGE: README     # the vault has no index.md; open its README
       SB_URL_PREFIX: /wiki      # served under this path; proxy passes it through unchanged
+      SB_SHELL_BACKEND: "off"    # no server-side shell; proxy blocks it too
       SB_NAME: ram wiki         # app name in the web manifest (installed PWA)
     volumes:
       - ${WIKI_VOLUME:-wiki-data}:/data
