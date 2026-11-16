@@ -184,23 +184,39 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
   - **History.** Each pass runs with `--backup-dir <prefix>/history/<UTC time>/`, so a file the
     pass replaces or deletes is moved there as it was. Folders older than `BUCKET_HISTORY_DAYS`
     (default 30, `0` = forever) are purged once a day. Age is read from the folder's **name**:
-    an object's own modification time is the note's, not the deletion's.
-  - **Restore, without git only.** At start, an EMPTY volume plus a non-empty bucket copy means
-    `rclone copy` from the bucket, then `chown` to `PUID:PGID`. With git there is no restore:
-    the server's `git clone` fills the volume and the bucket is a second copy.
-  - **The marker `/vault/.mirror-restoring`** is written before the copy and removed after it.
-    A restart in the middle of a restore finds it and finishes the restore; without it the
-    half-filled volume would count as content and be mirrored back over the bucket.
-  - **An empty volume is never mirrored over a non-empty bucket.** "Empty" means no content:
-    `.git`, `lost+found`, the marker and SilverBullet's own files do not count. So
-    `docker compose down -v` cannot empty the copy.
+    an object's own modification time is the note's, not the deletion's. Only folders named
+    like a pass (`2026-01-31T142500Z`) are ever purged.
+  - **Two marker files in the volume root, without git only** (with git the server would
+    commit them); neither is mirrored:
+    - **`.mirror-known`**: this volume has been seen by the script: restored, adopted with
+      content already in it, or started empty against an empty bucket. It is what tells a
+      volume that was emptied on purpose from one that was wiped: the marker lives in the
+      volume and goes with it on `docker compose down -v`.
+    - **`.mirror-restoring`**: a restore is under way. A restart in the middle finds it and
+      finishes the restore; without it the half-filled volume would count as content and be
+      mirrored back over the bucket.
+  - **Restore, without git only.** At start, a volume with no `.mirror-known` and no content
+    (`no_content`: `.git`, `lost+found`, the markers and SilverBullet's own files do not
+    count) plus a non-empty bucket copy means `rclone copy` from the bucket, then `chown` to
+    `PUID:PGID`. A volume with the marker is never restored into, even with every note
+    deleted: a deploy recreates this container while the server is running, and a restore
+    then would bring deleted notes back under it. With git there is no restore: the server's
+    `git clone` fills the volume and the bucket is a second copy.
+  - **What is mirrored.** Without git: the volume as it is, once it has `.mirror-known`.
+    Deleting every note is mirrored like any other change, and the notes go to `history/`.
+    Without the marker nothing is mirrored (the volume was wiped or swapped while running;
+    the log says so, and a restart restores or adopts it). With git there are no markers: a
+    tree with no content is not mirrored over a bucket copy that has some.
   - **Not mirrored:** `.git/` (history lives in the git remote), `_plug/` and `.silverbullet*`
-    (the wiki rebuilds them, and they would fill the history with noise). `CONFIG.md` and
-    `Library/` **are** mirrored.
+    (the wiki rebuilds them, and they would fill the history with noise), symlinks. `CONFIG.md`
+    and `Library/` **are** mirrored. A bucket keeps no empty folders, so a restore brings none
+    back.
+  - **A failed pass is one log line** with rclone's last error; the next pass is the retry
+    (`--retries 1`).
   - **Its healthcheck (`/tmp/mirror-ready`) gates `markdown-vault-mcp` and `wiki-sync`**, so
     neither sees a half-restored folder. `start_period: 30m` covers a large restore. It holds
-    them back only while a restore may still be needed (`must_wait`): git is off and the volume
-    has no content, or `.mirror-restoring` is there. Then missing keys or a bucket that cannot
+    them back only while a restore may still be needed (`must_wait`): git is off and either
+    `.mirror-restoring` is there, or the volume has neither `.mirror-known` nor content. Then missing keys or a bucket that cannot
     be listed (wrong name, keys or endpoint) keep the server down, retrying every 30 s; look at
     this log first when the server does not start. In every other case, git mode included, a
     broken bucket setting costs the copy and a line in the log, never the service.
@@ -308,12 +324,15 @@ for the runner (it reads the secret, not git).
   the wiki's settings. `EXCLUDE` applies in every mode, but only without git is it
   load-bearing: there, dropping the four patterns hands the wiki's settings and caches to
   agents and the index.
-- **An empty volume is never mirrored over a non-empty bucket, and `.mirror-restoring` is not
-  to be removed by hand.** Both live in `mirror/mirror.sh` (`no_content`, the marker). They are
-  what makes `docker compose down -v`, or a restart in the middle of a restore, harmless to the
-  bucket copy. A change to the mirror has to keep both.
-- **The bucket is a copy, never an input.** Nothing reads it except the restore of an empty
-  volume without git. Editing objects there changes nothing on the server.
+- **A wiped volume is never mirrored over the bucket, and the two markers (`.mirror-known`,
+  `.mirror-restoring`) are not to be created or removed by hand.** Without git the script
+  mirrors only a volume that carries `.mirror-known` and restores only into one that has
+  neither the marker nor content; with git it refuses a tree without content when the bucket
+  has some. That is what makes `docker compose down -v`, or a restart in the middle of a
+  restore, harmless to the bucket copy, and what keeps a restore from running under a live
+  server. A change to `mirror/mirror.sh` has to keep both properties.
+- **The bucket is a copy, never an input.** Nothing reads it except the restore of a new or
+  wiped volume without git. Editing objects there changes nothing on the server.
 - **With git, the committer identity is mandatory** (`GIT_COMMIT_NAME`/`_EMAIL`) — container git
   has no global user, so auto-commits fail silently without it.
 - **With git, the remote must be HTTPS.** SSH remotes are rejected at startup when a token is set;
@@ -402,5 +421,7 @@ bucket it survives in `history/` only if a mirror pass had copied it before it w
 overwritten. There is no `get_history`/`get_diff` either. The folder convention above is the
 only protection, as with git.
 
-`vault-mirror` is not a third writer: it writes into `/vault` only during the restore, before
-the other two start.
+`vault-mirror` is not a third writer: apart from its two marker files it writes into `/vault`
+only during a restore, and a restore runs only on a volume it has not seen and that has no
+content (or to finish one that was cut short). On the first start that is before the other two
+come up; a volume the server is already working on carries `.mirror-known` and is left alone.

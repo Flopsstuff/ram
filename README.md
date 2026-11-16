@@ -61,8 +61,8 @@ optional add-ons, both chosen in `.env`:
 - **The bucket** is a backup with automatic restore, not a second place to edit. Every
   `BUCKET_SYNC_INTERVAL_S` (300 by default) the vault is mirrored one way to `<prefix>/vault`.
   A file that a pass replaces or deletes moves to `<prefix>/history/<UTC time>/` and stays
-  there for `BUCKET_HISTORY_DAYS` (30 by default, `0` keeps it forever). Without git, an empty
-  volume is filled from the bucket at start. An object changed in the bucket does not reach a
+  there for `BUCKET_HISTORY_DAYS` (30 by default, `0` keeps it forever). Without git, a new
+  or wiped volume is filled from the bucket at start. An object changed in the bucket does not reach a
   running server. Works with Google Cloud Storage, DigitalOcean Spaces, AWS S3, Cloudflare R2
   and MinIO.
 - **`WIKI_VOLUME` must match the git setting.** `wiki-sync` refuses to start on a wrong
@@ -214,11 +214,11 @@ flowchart LR
 - **The volume is the vault; git and the bucket are add-ons.** Each can be turned on alone, and
   an instance with neither still works.
 - **The bucket is a one-way mirror with history, not two-way sync.** One host writes the vault,
-  so nothing needs to come back from the bucket except a restore onto an empty volume. Two-way
+  so nothing needs to come back from the bucket except a restore onto a new or wiped volume. Two-way
   sync is fragile: it needs its own state on both sides and a rule for every conflict. A plain
-  mirror with the replaced and deleted files kept aside covers the same loss cases. A volume
-  with no notes is never mirrored over a bucket that has some, so wiping the volume cannot
-  empty the copy.
+  mirror with the replaced and deleted files kept aside covers the same loss cases. The mirror
+  marks the volume it has seen: a wiped or swapped volume carries no mark and is never mirrored
+  over the copy, while a vault you emptied yourself is mirrored like any other change.
 - **No published ports, no Cloudflare Access.** TLS ends at Cloudflare's edge; authentication
   belongs to the MCP server and Authelia.
 

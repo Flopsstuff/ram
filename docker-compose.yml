@@ -76,9 +76,9 @@ services:
   # Copy of the vault in an S3-compatible bucket (mirror/mirror.sh), driven by
   # the BUCKET_* variables in .env. With BUCKET_NAME unset it reports ready and
   # idles. Mirrors /vault to the bucket on a timer, keeps replaced and deleted
-  # versions under history/, and, in the modes without git, fills an EMPTY
-  # volume from the bucket before the server and the wiki start: both wait for
-  # this healthcheck. The long start_period covers a large restore.
+  # versions under history/, and, in the modes without git, fills a new or
+  # wiped volume from the bucket before the server and the wiki start: both
+  # wait for this healthcheck. The long start_period covers a large restore.
   vault-mirror:
     image: rclone/rclone:1.76
     restart: unless-stopped

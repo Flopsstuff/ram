@@ -158,21 +158,24 @@ extra secret.
 
 **What ends up in the bucket.**
 
-- `<prefix>/vault/`: the vault as it is now.
+- `<prefix>/vault/`: the vault as it is now. Symlinks are not copied, and a bucket keeps no
+  empty folders.
 - `<prefix>/history/<UTC time>/`: the files one mirror pass replaced or deleted, as they were
   before it, at the same paths. The folder is named after the time of that pass, for example
   `2026-01-31T142500Z`.
 
 `.git/` and SilverBullet's caches (`_plug/`, `.silverbullet*`) are not copied.
 
-**Restore.** It is automatic and happens only without git: when `vault-mirror` starts and finds
-the volume empty and the bucket copy not, it downloads the copy before the server and the wiki
-come up. So moving to a new host, or recovering from a lost volume, is a normal deploy with the
+**Restore.** It is automatic and happens only without git: when `vault-mirror` starts on a
+volume it has not seen before, finds no notes in it and a copy in the bucket, it downloads the
+copy before the server and the wiki come up. So moving to a new host, or recovering from a lost volume, is a normal deploy with the
 same `BUCKET_*` values. With git the volume is filled by `git clone` and the bucket is never
 read back. Two things follow:
 
-- A wiped volume cannot empty the bucket: a volume with no notes is never mirrored over a
-  bucket copy that has some.
+- The mirror leaves a marker file, `.mirror-known`, in the volume it works on. A wiped or
+  replaced volume has no marker, so it is restored, never mirrored over the bucket. A vault
+  you emptied yourself keeps the marker: the deletion is mirrored, the notes move to
+  `history/`, and nothing comes back on the next start.
 - Without git and with an empty volume, while the bucket cannot be listed (wrong name, keys or
   endpoint), `vault-mirror` keeps retrying, and the server and the wiki wait for it: it cannot
   tell yet whether there is something to restore. Its log names the error. Once the volume has
