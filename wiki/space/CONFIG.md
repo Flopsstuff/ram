@@ -16,4 +16,21 @@ repo (`.git/info/exclude`), so agents never see it.
 config.set("view.defaults", {
   ["std.spaceTree"] = { dock = "lhs", open = true, width = 280 },
 })
+
+-- Log out: the wiki has no login of its own, Authelia's logout page ends the
+-- session. Also in the command palette as "Log out".
+command.define {
+  name = "Log out",
+  run = function()
+    editor.openUrl("/sso/logout", true)
+  end
+}
+actionButton.define {
+  icon = "log-out",
+  description = "Log out",
+  priority = -1,   -- after the built-in buttons
+  run = function()
+    editor.invokeCommand("Log out")
+  end
+}
 ```

@@ -262,7 +262,8 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     Without git the same files sit in the server's folder, and only
     `MARKDOWN_VAULT_MCP_EXCLUDE` keeps them away from agents (see Configuration).
   - **Wiki settings come from this repo.** `wiki/space/` (`CONFIG.md`: page tree open on the
-    left by default; `Library/wiki-style.md`: fonts) is mounted `:ro` and copied over the wiki's
+    left by default, and a "Log out" command and top-bar button that go to `/sso/logout`,
+    since SilverBullet has no login of its own; `Library/wiki-style.md`: fonts) is mounted `:ro` and copied over the wiki's
     folder on every start, in both modes, so edits made through SilverBullet's own settings
     screen are overwritten on the next deploy. Both pages carry `pageDecoration.hide` so they
     stay out of the tree. The copies are `chown`ed to the folder's owner, so SilverBullet, which

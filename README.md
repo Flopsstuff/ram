@@ -109,7 +109,8 @@ optional add-ons, both chosen in `.env`:
   names: it would not be indexed. Without git this exclusion is all that separates the wiki's
   files from the notes.
 - **One login** through Authelia, the same as for MCP OAuth.
-- **Its settings live in this repo**, in `wiki/space/`: the page tree on the left, the fonts.
+- **Its settings live in this repo**, in `wiki/space/`: the page tree on the left, the fonts,
+  and a log-out button at the end of the top bar (it leads to `/sso/logout`).
   They are copied in on every start, so change them here, not in the browser.
 
 ### What agents are told
