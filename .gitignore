@@ -38,6 +38,10 @@ data/
 desktop/
 *.mcpb
 
+# --- Python bytecode cache (left by running or checking the scripts) ---
+__pycache__/
+*.pyc
+
 # --- OS / editor cruft ---
 .DS_Store
 Thumbs.db
