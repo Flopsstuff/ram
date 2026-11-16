@@ -12,18 +12,18 @@ S3-compatible bucket are both optional: see [Storage modes](#storage-modes). Sem
 Google's `gemini-embedding-2` finds a note from a question asked in your own words, in Russian
 or English. You browse and edit the same notes in [SilverBullet](https://silverbullet.md/), and
 your edits reach the agents' search within one pull interval with git, within seconds without
-it. Everything sits behind one Cloudflare Tunnel and one [Authelia](https://www.authelia.com/)
-login.
+it. Everything sits on one hostname, behind one Cloudflare Tunnel and one
+[Authelia](https://www.authelia.com/) login.
 
 | | |
 | --- | --- |
-| **MCP endpoint** | `https://<MCP_DOMAIN>/mcp`, streamable HTTP |
+| **MCP endpoint** | `https://<DOMAIN>/mcp`, streamable HTTP |
 | **Auth** | multi-auth: a static bearer token (headless agents) **or** OAuth 2.1 / OIDC through Authelia (GUI clients) |
-| **Wiki** | `https://<WIKI_DOMAIN>`: SilverBullet behind Authelia forward-auth |
-| **Login portal** | `https://<AUTH_DOMAIN>`: Authelia, the users in `users_database.yml`, for both OAuth and the wiki |
+| **Wiki** | `https://<DOMAIN>/wiki/`: SilverBullet behind the Authelia login |
+| **Login portal** | `https://<DOMAIN>/sso/`: Authelia, the users in `users_database.yml`, for both OAuth and the wiki |
 | **Search** | semantic by default on `gemini-embedding-2` (Google AI Studio), with note title and heading context |
 | **Vault** | a docker volume. Optional: a private GitHub repo `<owner>/<vault-repo>`, cloned and managed read-write by the server, and a copy in an S3-compatible bucket |
-| **Ingress** | Cloudflare Tunnel, three hostnames, no published ports |
+| **Ingress** | Cloudflare Tunnel, one hostname routed by path, no published ports |
 | **Run** | fill in the configuration once, then `docker compose up -d`. Optional: push to `main` → GitHub Actions → self-hosted runner |
 
 **Install your own:** [INSTALL.md](INSTALL.md).
@@ -33,13 +33,28 @@ login.
 | Service | What it does |
 | --- | --- |
 | `markdown-vault-mcp` | The MCP server: notes, links, conventions, semantic + keyword search. With git: managed git (auto-commit, push, periodic rebase pull). Without: a file watcher that indexes what the wiki writes |
-| `authelia` | OIDC provider for MCP OAuth, and forward-auth for the wiki. Its user file is the allowlist |
-| `cloudflared` | The tunnel: `<MCP_DOMAIN>` → MCP, `<AUTH_DOMAIN>` → Authelia, `<WIKI_DOMAIN>` → wiki-proxy |
+| `authelia` | OIDC provider for MCP OAuth, and the login in front of the wiki. Its user file is the allowlist |
+| `cloudflared` | The tunnel: hands every request for `<DOMAIN>` to `proxy` |
+| `proxy` | nginx: routes the one hostname by path (see [One hostname](#one-hostname)) and asks Authelia about every wiki request |
 | `wiki` | SilverBullet. With git: on its **own clone** of the vault. Without: on the server's volume |
 | `wiki-sync` | Prepares the wiki's folder. With git: commits and pushes your edits, pulls the agents'. Without: copies the wiki settings in and idles |
-| `wiki-proxy` | Caddy: asks Authelia about every wiki request |
 | `vault-mirror` | rclone: mirrors the vault to an S3-compatible bucket and keeps replaced and deleted files as history. Idles when no bucket is set |
 | `okf-maintenance` | Once a day: turns wikilinks left by the wiki into OKF links, regenerates every folder's `index.md`, and reports notes that break the format and links that lead nowhere |
+
+### One hostname
+
+Everything is served from `<DOMAIN>`. The `proxy` service (nginx, `proxy/nginx.conf`) is the
+only thing the tunnel talks to, and the path decides where a request goes:
+
+| Path | Goes to | Login |
+| --- | --- | --- |
+| `/mcp`, the OAuth endpoints (`/authorize`, `/token`, `/register`, `/auth/callback`), `/.well-known/...`, upload and download links, and everything else at the root | the MCP server | bearer token or OAuth |
+| `/wiki/` | SilverBullet | the Authelia session; nginx asks Authelia about every request |
+| `/sso/` | Authelia: the login portal and the OIDC provider | none: this is where you log in |
+| exactly `/` | a redirect to `/wiki/` | none |
+
+The MCP server keeps the root because MCP clients look for the OAuth metadata at the root of
+the host. A new app gets its own prefix in `proxy/nginx.conf`.
 
 ### Storage modes
 
@@ -117,9 +132,9 @@ Step by step, from an empty host to connected agents: **[INSTALL.md](INSTALL.md)
 
 ## Running
 
-The whole service is one docker compose stack. Fill in the four configuration files once
-(`.env`, `cloudflared/config.yml`, `authelia/configuration.yml`, `authelia/users_database.yml`,
-each from its `*.example` template) and start it on any host with Docker:
+The whole service is one docker compose stack. Fill in the three configuration files once
+(`.env`, `authelia/configuration.yml`, `authelia/users_database.yml`, each from its `*.example`
+template) and start it on any host with Docker:
 
 ```bash
 docker compose up -d
@@ -138,7 +153,6 @@ images. The gitignored config files are rebuilt from GitHub secrets on every run
 | Secret | Becomes |
 | --- | --- |
 | `DOTENV` | `.env` |
-| `CLOUDFLARED_CONFIG` | `cloudflared/config.yml` |
 | `AUTHELIA_CONFIG` | `authelia/configuration.yml` |
 | `AUTHELIA_USERS` | `authelia/users_database.yml` |
 
@@ -149,12 +163,14 @@ images. The gitignored config files are rebuilt from GitHub secrets on every run
 
 - **Claude Code and other headless agents**, with the bearer token:
   ```bash
-  claude mcp add -t http -s user ram https://<MCP_DOMAIN>/mcp \
+  claude mcp add -t http -s user ram https://<DOMAIN>/mcp \
     -H "Authorization: Bearer <TOKEN>"
   ```
 - **GUI clients** (Claude web and mobile, ChatGPT developer mode): add
-  `https://<MCP_DOMAIN>/mcp` with OAuth and log in at `<AUTH_DOMAIN>`.
-- **The wiki:** open `https://<WIKI_DOMAIN>`.
+  `https://<DOMAIN>/mcp` with OAuth and log in at the Authelia portal the client opens
+  (`https://<DOMAIN>/sso/`).
+- **The wiki:** open `https://<DOMAIN>/wiki/`, or just `https://<DOMAIN>`, which redirects
+  there.
 
 ## Architecture
 
@@ -169,10 +185,10 @@ flowchart LR
 
   subgraph host["Docker host, compose project ram-brain"]
     cfd["cloudflared"]
-    mcp["markdown-vault-mcp<br/>MCP_DOMAIN"]
-    auth["authelia<br/>AUTH_DOMAIN"]
-    proxy["wiki-proxy, Caddy<br/>WIKI_DOMAIN"]
-    wiki["wiki, SilverBullet"]
+    proxy["proxy, nginx<br/>one hostname, routed by path"]
+    mcp["markdown-vault-mcp<br/>/mcp and the root"]
+    auth["authelia<br/>/sso/"]
+    wiki["wiki, SilverBullet<br/>/wiki/"]
     sync["wiki-sync"]
     mirror["vault-mirror"]
     okf["okf-maintenance"]
@@ -184,12 +200,12 @@ flowchart LR
   agents --> edge
   you --> edge
   edge --> cfd
-  cfd --> mcp
-  cfd --> auth
   cfd --> proxy
-  mcp -. "OIDC" .-> auth
-  proxy -. "forward-auth" .-> auth
+  proxy --> mcp
+  proxy --> auth
   proxy --> wiki
+  proxy -. "wiki request: logged in?" .-> auth
+  mcp -. "OIDC" .-> auth
   mcp --- vault
   mcp --- data
   wiki --- wdata
@@ -217,6 +233,15 @@ flowchart LR
   a year.
 - **One Authelia for everything.** The same login guards MCP OAuth and the wiki, so there is
   no second user system.
+- **One hostname, routed by path.** One nginx behind the tunnel sends `/wiki/` to the wiki,
+  `/sso/` to Authelia and everything else to the MCP server. An install needs one name, one DNS
+  record and three configuration files. The MCP server keeps the root because MCP clients look
+  for the OAuth metadata at the root of the host; every other app lives under its own prefix.
+- **The price of one hostname is one browser origin.** The wiki, the login portal and the MCP
+  OAuth endpoints share it. SilverBullet runs scripts found in notes, and notes are written by
+  agents, so a script in a note can reach `/sso/` and the OAuth endpoints with the reader's
+  session. Separate hostnames used to prevent that. The simpler install was chosen anyway: the
+  wiki is a review tool for the owner, and agents are told to treat notes as data.
 - **A remote embedding model.** Gemini ranks paraphrased Russian questions far better than the
   local models we tried, and re-embedding costs API calls instead of the host's CPU.
 - **With git, the wiki writes through git, never into the server's folder.** The server stays
@@ -242,6 +267,7 @@ flowchart LR
 | Option | Why dropped |
 | --- | --- |
 | Cloudflare Access or Pocket ID as the IdP | token lifetimes capped at 1 month and 1 hour |
+| Three hostnames (MCP, login, wiki), split by a tunnel ingress file, with Caddy in front of the wiki | it kept the wiki on its own browser origin, but an install needed three DNS records under one parent domain and a fourth configuration file |
 | Local fastembed models (bge-small, multilingual mpnet) | weaker on Russian paraphrases, and every re-embed pinned the host's CPU |
 | Hybrid search as the default | its keyword half stems English only, so it misses Russian word forms |
 | A static read-only site (Quartz) for browsing | the wiki needed editing too |

@@ -1,6 +1,6 @@
 # Install your own ram
 
-This recipe stands up a new, independent instance from scratch: its own vault, its own domains,
+This recipe stands up a new, independent instance from scratch: its own vault, its own hostname,
 its own host. The result is one docker compose stack: you fill in the configuration once and
 run `docker compose up -d`. Nothing else is needed; deploying from GitHub Actions is optional
 and comes last (step 6). Plan about an hour; most of it is waiting for DNS. What each piece
@@ -27,7 +27,7 @@ does and why it is built this way is in [README.md](README.md).
 | Item | Notes |
 | --- | --- |
 | An always-on host with Docker + Compose v2 | No inbound ports: all traffic arrives through the tunnel. |
-| A domain on Cloudflare | Three hostnames under **one parent domain**: `<MCP_DOMAIN>`, `<AUTH_DOMAIN>`, `<WIKI_DOMAIN>` (for example `brain.`, `auth.` and `wiki.` of the same domain). Authelia's login cookie is set on the parent, so it must cover all three. |
+| A domain on Cloudflare | **One hostname**, `<DOMAIN>` (for example `brain.` of your domain). Everything is served from it, by path: the MCP endpoint at `/mcp`, the wiki at `/wiki/`, the login portal at `/sso/`. |
 | A GitHub account **(git only)** | Owns the vault repo. The fine-grained token in step 1 must belong to this same account: it can't reach a repo where it is only a collaborator. |
 | An S3-compatible bucket **(bucket only)** | Google Cloud Storage, DigitalOcean Spaces, AWS S3, Cloudflare R2 or MinIO. Step 2.4. |
 | A Google AI Studio API key | For `gemini-embedding-2`. Create one at <https://aistudio.google.com/apikey>. |
@@ -60,7 +60,7 @@ Copy `.env.example` to `.env` and fill in:
 
 | Variable | Value |
 | --- | --- |
-| `MARKDOWN_VAULT_MCP_BASE_URL` | `https://<MCP_DOMAIN>` |
+| `MARKDOWN_VAULT_MCP_BASE_URL` | `https://<DOMAIN>`, with no path: the MCP server owns the root of the hostname |
 | `MARKDOWN_VAULT_MCP_BEARER_TOKEN` | `openssl rand -hex 32`: the shared token for headless agents |
 | `MARKDOWN_VAULT_MCP_GIT_REPO_URL` **(git only)** | `https://github.com/<owner>/<vault-repo>.git` (HTTPS only). Without git, leave every `GIT_*` variable unset |
 | `MARKDOWN_VAULT_MCP_GIT_TOKEN` **(git only)** | the token from step 1.4 |
@@ -70,7 +70,8 @@ Copy `.env.example` to `.env` and fill in:
 | `OPENAI_API_KEY` | the AI Studio key. The bare name, no prefix: the server talks to Gemini through its OpenAI-compatible endpoint |
 | `MARKDOWN_VAULT_MCP_INSTANCE_DESCRIPTION` | one line on what this vault is for |
 | `MARKDOWN_VAULT_MCP_INSTRUCTIONS_EXTRA` | your rules for agents: language, search habits, when to offer saving knowledge. Keep both under ~500 characters in total: Claude Code cuts a server's instructions at 2,048 |
-| `MARKDOWN_VAULT_MCP_OIDC_*` | step 2.2 |
+| `MARKDOWN_VAULT_MCP_OIDC_CONFIG_URL` | `https://<DOMAIN>/sso/.well-known/openid-configuration`: Authelia lives under `/sso` |
+| the other `MARKDOWN_VAULT_MCP_OIDC_*` | step 2.2 |
 | `CF_TUNNEL_ID`, `TUNNEL_CRED_CONTENTS` | step 2.3 |
 | `OKF_MAINTENANCE_AT` (optional) | when the daily OKF upkeep runs: `HH:MM` in UTC, or in `TZ` if you set it. Unset means `02:30`; `off` disables it |
 
@@ -85,7 +86,27 @@ The names are therefore reserved at the vault root: a note at such a path is not
 ### 2.2 Authelia
 
 Copy `authelia/configuration.yml.example` and `authelia/users_database.yml.example` to their
-real names, replace the placeholders with your hostnames, then generate the secrets:
+real names and replace `<DOMAIN>` with your hostname. These values in `configuration.yml` hold
+the hostname or the `/sso` prefix:
+
+| Value | Set to |
+| --- | --- |
+| `server.address` | `'tcp://:9091/sso'`, as the template has it. The path is the prefix Authelia is served under |
+| `session.cookies[].domain` | `<DOMAIN>`: the hostname itself |
+| `session.cookies[].authelia_url` | `https://<DOMAIN>/sso` |
+| `session.cookies[].default_redirection_url` | `https://<DOMAIN>/wiki/` |
+| `redirect_uris` of the `ram-brain` client | `https://<DOMAIN>/auth/callback` |
+| `audience` of the `ram-brain` client | `https://<DOMAIN>` and `https://<DOMAIN>/mcp` |
+
+With them the login portal is `https://<DOMAIN>/sso/` and the OIDC issuer is
+`https://<DOMAIN>/sso`.
+
+**The `/sso` prefix is written in three places, and they must agree:** `server.address` here,
+the `/sso/` locations in `proxy/nginx.conf`, and `MARKDOWN_VAULT_MCP_OIDC_CONFIG_URL` in `.env`.
+The templates agree as shipped, so leave the prefix alone. `/auth` cannot be used instead: the
+MCP server owns `/auth/callback`.
+
+Then generate the secrets:
 
 ```bash
 IMG=authelia/authelia:latest
@@ -113,19 +134,17 @@ docker run --rm --entrypoint authelia -v "$PWD/authelia":/config $IMG \
 ### 2.3 Cloudflare Tunnel
 
 ```bash
-cloudflared tunnel login                               # opens a browser, pick your domain
-cloudflared tunnel create <name>                       # prints the tunnel ID and a creds file
-cloudflared tunnel route dns <name> <MCP_DOMAIN>
-cloudflared tunnel route dns <name> <AUTH_DOMAIN>
-cloudflared tunnel route dns <name> <WIKI_DOMAIN>
+cloudflared tunnel login                  # opens a browser, pick your domain
+cloudflared tunnel create <tunnel>        # prints the tunnel ID and a creds file
+cloudflared tunnel route dns <tunnel> <DOMAIN>
 ```
 
-Copy `cloudflared/config.yml.example` to `cloudflared/config.yml` and set the tunnel ID and
-the three hostnames. In `.env`, set `CF_TUNNEL_ID` to the tunnel ID and
-`TUNNEL_CRED_CONTENTS` to the creds file's JSON on one line.
+In `.env`, set `CF_TUNNEL_ID` to the tunnel ID and `TUNNEL_CRED_CONTENTS` to the creds file's
+JSON on one line. That is all the tunnel needs. There is no ingress file: compose points the
+tunnel at the `proxy` service, and `proxy` routes by path.
 
-**Do not put Cloudflare Access in front of any of these hostnames.** It replaces the bearer
-header headless agents send and gets in the way of both Authelia login flows.
+**Do not put Cloudflare Access in front of `<DOMAIN>`.** It replaces the bearer header headless
+agents send and gets in the way of both Authelia login flows.
 
 ### 2.4 Bucket (bucket only)
 
@@ -196,8 +215,8 @@ pass saw it: two edits between two passes leave one history entry, not two.
 
 ## 3. Start
 
-On the host, in your clone, with the four configuration files in place (`.env`,
-`cloudflared/config.yml`, `authelia/configuration.yml`, `authelia/users_database.yml`):
+On the host, in your clone, with the three configuration files in place (`.env`,
+`authelia/configuration.yml`, `authelia/users_database.yml`):
 
 ```bash
 docker compose up -d
@@ -239,11 +258,13 @@ docker compose exec okf-maintenance \
 
 | Check | Expect |
 | --- | --- |
-| `curl -i https://<MCP_DOMAIN>/mcp` | `401` with a `WWW-Authenticate` header |
-| `curl -i https://<MCP_DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"` | an MCP response |
-| `curl -sI https://<AUTH_DOMAIN>/.well-known/openid-configuration` | `200` |
-| `curl -sI https://<WIKI_DOMAIN>/` | `302` to `https://<AUTH_DOMAIN>/…` |
-| `https://<WIKI_DOMAIN>` in a browser | the Authelia login, then the vault with its page tree on the left |
+| `curl -i https://<DOMAIN>/mcp` | `401` with a `WWW-Authenticate` header |
+| `curl -i https://<DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"` | an MCP response |
+| `curl -sI https://<DOMAIN>/sso/.well-known/openid-configuration` | `200` |
+| `curl -sI https://<DOMAIN>/` | `302` to `/wiki/` |
+| `curl -sI https://<DOMAIN>/wiki/` | `302` to `https://<DOMAIN>/sso/?rd=…` |
+| `https://<DOMAIN>/sso/` in a browser | the Authelia login portal |
+| `https://<DOMAIN>` in a browser | the Authelia login, then the vault at `/wiki/` with its page tree on the left |
 | `docker compose logs vault-mirror` on the host **(bucket only)** | `running: mirror to …`, and no `mirror pass failed` after it |
 | `docker compose logs wiki-sync` on the host, if the wiki does not come up | a line that says which `WIKI_VOLUME` setting it expects |
 | `docker compose logs okf-maintenance` on the host | `next run at …` |
@@ -252,21 +273,26 @@ docker compose exec okf-maintenance \
 
 - **Claude Code**, for every project of the user:
   ```bash
-  claude mcp add -t http -s user ram https://<MCP_DOMAIN>/mcp \
+  claude mcp add -t http -s user ram https://<DOMAIN>/mcp \
     -H "Authorization: Bearer <TOKEN>"
   ```
 - **GUI clients** (Claude web and mobile, ChatGPT developer mode): add
-  `https://<MCP_DOMAIN>/mcp`, choose OAuth, and log in at `<AUTH_DOMAIN>`.
+  `https://<DOMAIN>/mcp`, choose OAuth, and log in at the Authelia portal the client opens
+  (`https://<DOMAIN>/sso/`).
 
 ### If the OAuth login fails
 
-Both fixes go into the `ram-brain` client in `authelia/configuration.yml`:
+Two fixes go into the `ram-brain` client in `authelia/configuration.yml`:
 
 - **`invalid_target` at the login redirect.** MCP clients send
-  `resource=https://<MCP_DOMAIN>/mcp` (RFC 8707). Add `https://<MCP_DOMAIN>` and
-  `https://<MCP_DOMAIN>/mcp` to the client's `audience`.
+  `resource=https://<DOMAIN>/mcp` (RFC 8707). Add `https://<DOMAIN>` and
+  `https://<DOMAIN>/mcp` to the client's `audience`.
 - **`invalid_client` at the token exchange.** The server authenticates with HTTP Basic. Set
   `token_endpoint_auth_method: 'client_secret_basic'`.
+
+And check the addresses: `MARKDOWN_VAULT_MCP_OIDC_CONFIG_URL` must carry the `/sso` prefix, and
+the hostname must be the same in `.env` and in `authelia/configuration.yml` (the table in step
+2.2).
 
 ## 6. Deploy from GitHub Actions (optional)
 
@@ -281,10 +307,9 @@ images. Skip this step and the stack works the same; you then update it by hand 
    file from a secret on each run:
 
    ```bash
-   gh secret set DOTENV             < .env
-   gh secret set CLOUDFLARED_CONFIG < cloudflared/config.yml
-   gh secret set AUTHELIA_CONFIG    < authelia/configuration.yml
-   gh secret set AUTHELIA_USERS     < authelia/users_database.yml
+   gh secret set DOTENV          < .env
+   gh secret set AUTHELIA_CONFIG < authelia/configuration.yml
+   gh secret set AUTHELIA_USERS  < authelia/users_database.yml
    ```
 
 3. **First deploy.**
@@ -337,8 +362,8 @@ from GitHub: `gh secret set AUTHELIA_USERS < authelia/users_database.yml`, then 
 
 **Who gets in.** With the shipped `default_policy: one_factor`, every user in the file can log
 in to both the wiki and MCP over OAuth. To narrow it:
-- the wiki: add `access_control.rules` for `<WIKI_DOMAIN>` with a `subject`, such as
-  `'group:wiki'`;
+- the wiki: add `access_control.rules` for `<DOMAIN>` with a `subject`, such as
+  `'group:wiki'`. The wiki is the only thing these rules are asked about;
 - MCP over OAuth: give the `ram-brain` client its own authorization policy with the same kind
   of `subject`.
 
@@ -363,5 +388,41 @@ Configure an SMTP notifier to get self-service resets and two-factor (TOTP) enro
 - **Runner**, if you deploy from GitHub. The second instance needs its own runner checkout.
   Also rename the workflow's `concurrency.group`, so the two deploys are not queued as one.
 - **Bucket.** Two instances can share one bucket only with different `BUCKET_PREFIX` values.
-- **Tunnel and Authelia.** Separate ones are simplest. Sharing them works, but then a change to
-  one instance can break the other.
+- **Hostname, tunnel and Authelia.** Each instance gets its own. The tunnel hands every request
+  to one `proxy`, so it cannot serve two stacks, and Authelia's cookie and issuer belong to one
+  hostname.
+
+## Moving from three hostnames
+
+Earlier versions of this repo used three hostnames, one each for the MCP server, the login
+portal and the wiki, split by an ingress file for the tunnel. To move such an install to one
+hostname:
+
+1. **Pick `<DOMAIN>`.** Keep the old MCP hostname if you can: bearer agents then go on working
+   with the address they have.
+2. **Take the new version** of this repo (`git pull`).
+3. **Change the configuration as in the templates.**
+   - `authelia/configuration.yml`: `server.address` becomes `'tcp://:9091/sso'`, and the
+     `session.cookies` block gets the three values from the table in step 2.2. If `<DOMAIN>`
+     is not the old MCP hostname, the client's `redirect_uris` and `audience` change too.
+   - `.env`: `MARKDOWN_VAULT_MCP_OIDC_CONFIG_URL` gets the `/sso` prefix, and
+     `MARKDOWN_VAULT_MCP_BASE_URL` changes if the hostname does.
+   - `authelia/users_database.yml` stays as it is.
+   - `cloudflared/config.yml` is no longer read. Delete it.
+4. **Deploy.** By hand:
+   ```bash
+   docker compose up -d --force-recreate --remove-orphans
+   ```
+   `--remove-orphans` takes away the old `wiki-proxy` container. If you deploy from GitHub:
+   update the `DOTENV` and `AUTHELIA_CONFIG` secrets, then deploy. The `CLOUDFLARED_CONFIG`
+   secret is no longer read and can be deleted.
+5. **DNS.** Remove the two records that are no longer used, the old login and wiki hostnames,
+   in the Cloudflare dashboard. If `<DOMAIN>` is a new name, route it to the tunnel as in step
+   2.3.
+
+What to expect afterwards:
+
+- **OAuth clients log in again**: Authelia's issuer address has changed.
+- **Bearer agents** keep working if `<DOMAIN>` is the old MCP hostname. Otherwise give them the
+  new address.
+- **The wiki moves** to `https://<DOMAIN>/wiki/`. An installed PWA has to be reinstalled.

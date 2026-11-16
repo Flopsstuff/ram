@@ -45,7 +45,7 @@ export MCP_REMOTE_VERSION="${MCP_REMOTE_VERSION:-latest}"
 
 if [ -z "${MCPB_URL:-}" ]; then
   MCPB_BASE_URL="$(read_dotenv_var MARKDOWN_VAULT_MCP_BASE_URL || true)"
-  if [ -z "$MCPB_BASE_URL" ] || [[ "$MCPB_BASE_URL" == *"<MCP_DOMAIN>"* ]]; then
+  if [ -z "$MCPB_BASE_URL" ] || [[ "$MCPB_BASE_URL" == *"DOMAIN>"* ]]; then
     echo "ERROR: MCPB_URL is unset and MARKDOWN_VAULT_MCP_BASE_URL is missing or unfilled in .env" >&2
     exit 1
   fi

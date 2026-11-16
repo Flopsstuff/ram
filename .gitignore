@@ -10,12 +10,11 @@ plan.md
 secrets/
 
 # --- Cloudflare Tunnel ---
-# Real config.yml holds the tunnel ID + real hostnames → gitignored; the
-# template (config.yml.example) is committed. Credentials stay inline in .env
-# (TUNNEL_CRED_CONTENTS). On the CD runner config.yml is materialized from the
-# CLOUDFLARED_CONFIG secret. *.pem guards any stray tunnel cert/key.
-cloudflared/*
-!cloudflared/config.yml.example
+# The tunnel is configured from .env alone (CF_TUNNEL_ID, TUNNEL_CRED_CONTENTS).
+# cloudflared/ is where `cloudflared tunnel create` output tends to be kept,
+# and an ingress file from before the single hostname may still be there;
+# *.pem guards any stray tunnel cert/key.
+cloudflared/
 *.pem
 
 # --- Authelia (OIDC IdP) ---
