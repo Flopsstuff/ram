@@ -214,7 +214,11 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
   - **A failed pass is one log line** with rclone's last error; the next pass is the retry
     (`--retries 1`).
   - **Its healthcheck (`/tmp/mirror-ready`) gates `markdown-vault-mcp` and `wiki-sync`**, so
-    neither sees a half-restored folder. `start_period: 30m` covers a large restore. It holds
+    neither sees a half-restored folder. `start_period: 15m` is how long a restore may take before `docker compose up` gives up
+    on the dependency. It is kept under the deploy job's `timeout-minutes: 20`, so a restore
+    that fits is followed by the rest of the stack in the same run. A longer one fails the
+    deploy, but the container keeps restoring (`restart: unless-stopped`); run the deploy
+    again once its log says `restore done`. It holds
     them back only while a restore may still be needed (`must_wait`): git is off and either
     `.mirror-restoring` is there, or the volume has neither `.mirror-known` nor content. Then missing keys or a bucket that cannot
     be listed (wrong name, keys or endpoint) keep the server down, retrying every 30 s; look at

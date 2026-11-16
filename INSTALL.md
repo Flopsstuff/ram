@@ -176,6 +176,9 @@ read back. Two things follow:
   replaced volume has no marker, so it is restored, never mirrored over the bucket. A vault
   you emptied yourself keeps the marker: the deletion is mirrored, the notes move to
   `history/`, and nothing comes back on the next start.
+- The deploy waits up to 15 minutes for a restore. A vault of notes takes seconds; if yours
+  takes longer, the deploy fails, the restore goes on in the `vault-mirror` container, and you
+  run the deploy again once its log says `restore done`.
 - Without git and with an empty volume, while the bucket cannot be listed (wrong name, keys or
   endpoint), `vault-mirror` keeps retrying, and the server and the wiki wait for it: it cannot
   tell yet whether there is something to restore. Its log names the error. Once the volume has

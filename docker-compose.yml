@@ -78,7 +78,10 @@ services:
   # idles. Mirrors /vault to the bucket on a timer, keeps replaced and deleted
   # versions under history/, and, in the modes without git, fills a new or
   # wiped volume from the bucket before the server and the wiki start: both
-  # wait for this healthcheck. The long start_period covers a large restore.
+  # wait for this healthcheck. start_period is the time a restore may take
+  # before `up` gives up; it stays under the deploy job's 20-minute timeout.
+  # A longer restore still finishes in this container: run the deploy again
+  # afterwards.
   vault-mirror:
     image: rclone/rclone:1.76
     restart: unless-stopped
@@ -94,7 +97,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 12
-      start_period: 30m
+      start_period: 15m
     networks:
       - brain
     # NOTE: intentionally no `ports:` — it only dials out to the bucket.
