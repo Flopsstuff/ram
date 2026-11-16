@@ -209,6 +209,13 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     SilverBullet fetch any URL, which from inside the compose network reaches the other
     containers and the host's network). The price of the second: SilverBullet cannot install
     a library from a URL; the wiki's settings come from `wiki/space/` anyway.
+  - **Rate limits per client address** (`limit_req`, answer 429): 30 r/s for everything, with
+    a burst of 100 on the MCP side, 300 on `/wiki/` (the first load syncs every note) and 50
+    on `/sso/`; 10 per minute, burst 5, on the login and second-factor endpoints and on
+    `/register`, which is public and writes to the server's store. The key is the address in
+    Cloudflare's `CF-Connecting-IP` (`real_ip_header`, trusted from the private ranges only):
+    every request arrives from cloudflared, so without it all clients would share one limit.
+    `okf-maintenance` talks to the server directly and is not limited.
   - **`/wiki/` raises the body cap to 100m** for attachment uploads; the 8m default is for the
     MCP side. `/internal/authz` lifts the cap altogether (`client_max_body_size 0`): the login
     subrequest is checked against the caller's Content-Length, and under the 8m default an
