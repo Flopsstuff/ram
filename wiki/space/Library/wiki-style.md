@@ -12,6 +12,8 @@ start; `Library/` is excluded from the vault repo.
 html {
   --ui-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Roboto", sans-serif !important;
   --editor-font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", "Roboto", sans-serif !important;
+  /* notes are hard-wrapped at about 100 characters; the default 800px breaks every line */
+  --editor-width: 1000px;
 }
 /* code stays monospace */
 #sb-editor .sb-code,
