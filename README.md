@@ -5,13 +5,15 @@
 One always-on **shared "second brain"** for AI agents on many machines, plus a **wiki in your
 browser** for the human who owns it.
 
-Agents read and write a git-backed markdown vault through a single
-[`markdown-vault-mcp`](https://github.com/pvliesdonk/markdown-vault-mcp) server. Every write is
-committed and pushed, and semantic search on Google's `gemini-embedding-2` finds a note from a
-question asked in your own words, in Russian or English. You browse and edit the same notes in
-[SilverBullet](https://silverbullet.md/), and your edits reach the agents' search within one
-pull interval. Everything sits behind one Cloudflare Tunnel and one
-[Authelia](https://www.authelia.com/) login.
+Agents read and write a markdown vault through a single
+[`markdown-vault-mcp`](https://github.com/pvliesdonk/markdown-vault-mcp) server. The vault lives
+on a docker volume. A git remote, where every write is committed and pushed, and a copy in an
+S3-compatible bucket are both optional: see [Storage modes](#storage-modes). Semantic search on
+Google's `gemini-embedding-2` finds a note from a question asked in your own words, in Russian
+or English. You browse and edit the same notes in [SilverBullet](https://silverbullet.md/), and
+your edits reach the agents' search within one pull interval with git, within seconds without
+it. Everything sits behind one Cloudflare Tunnel and one [Authelia](https://www.authelia.com/)
+login.
 
 | | |
 | --- | --- |
@@ -20,7 +22,7 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 | **Wiki** | `https://<WIKI_DOMAIN>`: SilverBullet behind Authelia forward-auth |
 | **Login portal** | `https://<AUTH_DOMAIN>`: Authelia, the users in `users_database.yml`, for both OAuth and the wiki |
 | **Search** | semantic by default on `gemini-embedding-2` (Google AI Studio), with note title and heading context |
-| **Vault** | a private GitHub repo `<owner>/<vault-repo>`, cloned and managed read-write by the server |
+| **Vault** | a docker volume. Optional: a private GitHub repo `<owner>/<vault-repo>`, cloned and managed read-write by the server, and a copy in an S3-compatible bucket |
 | **Ingress** | Cloudflare Tunnel, three hostnames, no published ports |
 | **Deploy** | push to `main` → GitHub Actions → self-hosted runner → `docker compose` |
 
@@ -30,12 +32,41 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 
 | Service | What it does |
 | --- | --- |
-| `markdown-vault-mcp` | The MCP server: notes, links, conventions, semantic + keyword search, managed git (auto-commit, push, periodic rebase pull) |
+| `markdown-vault-mcp` | The MCP server: notes, links, conventions, semantic + keyword search. With git: managed git (auto-commit, push, periodic rebase pull). Without: a file watcher that indexes what the wiki writes |
 | `authelia` | OIDC provider for MCP OAuth, and forward-auth for the wiki. Its user file is the allowlist |
 | `cloudflared` | The tunnel: `<MCP_DOMAIN>` → MCP, `<AUTH_DOMAIN>` → Authelia, `<WIKI_DOMAIN>` → wiki-proxy |
-| `wiki` | SilverBullet on its **own clone** of the vault |
-| `wiki-sync` | Git for the wiki's clone: commits and pushes your edits, pulls the agents' |
+| `wiki` | SilverBullet. With git: on its **own clone** of the vault. Without: on the server's volume |
+| `wiki-sync` | Prepares the wiki's folder. With git: commits and pushes your edits, pulls the agents'. Without: copies the wiki settings in and idles |
 | `wiki-proxy` | Caddy: asks Authelia about every wiki request |
+| `vault-mirror` | rclone: mirrors the vault to an S3-compatible bucket and keeps replaced and deleted files as history. Idles when no bucket is set |
+
+### Storage modes
+
+The `vault-data` docker volume is always there. A git remote and a bucket are independent,
+optional add-ons, both chosen in `.env`:
+
+| Mode | `.env` | Wiki works on | An empty volume is filled from |
+| --- | --- | --- | --- |
+| Volume only | no `GIT_*`, no `BUCKET_*`, `WIKI_VOLUME=vault-data` | the server's `vault-data` volume | nothing: it starts empty |
+| Git | the Git block, `WIKI_VOLUME` unset | its own clone on `wiki-data` | `git clone` |
+| Bucket | `BUCKET_*`, `WIKI_VOLUME=vault-data` | the server's `vault-data` volume | the bucket |
+| Git + bucket | both blocks, `WIKI_VOLUME` unset | its own clone on `wiki-data` | `git clone`; the bucket is a second copy, never restored from |
+
+- **Git** gives full history (`get_history`, `get_diff`), an off-host copy, and a merge when an
+  agent and the browser edit the same note.
+- **Without git** the wiki writes straight into the server's folder and the server's file
+  watcher indexes the change, so a browser edit is searchable about two seconds later. There is
+  no history and no merge: when an agent and the browser write the same file at once, the last
+  write wins.
+- **The bucket** is a backup with automatic restore, not a second place to edit. Every
+  `BUCKET_SYNC_INTERVAL_S` (300 by default) the vault is mirrored one way to `<prefix>/vault`.
+  A file that a pass replaces or deletes moves to `<prefix>/history/<UTC time>/` and stays
+  there for `BUCKET_HISTORY_DAYS` (30 by default, `0` keeps it forever). Without git, a new
+  or wiped volume is filled from the bucket at start. An object changed in the bucket does not reach a
+  running server. Works with Google Cloud Storage, DigitalOcean Spaces, AWS S3, Cloudflare R2
+  and MinIO.
+- **`WIKI_VOLUME` must match the git setting.** `wiki-sync` refuses to start on a wrong
+  pairing and says so in its log.
 
 ### Search
 
@@ -49,9 +80,18 @@ pull interval. Everything sits behind one Cloudflare Tunnel and one
 
 ### The wiki
 
-- **Its own clone, synced through git** on the server's own timings: your edits are pushed
-  `GIT_PUSH_DELAY_S` after you stop typing, agents' edits arrive every `GIT_PULL_INTERVAL_S`.
-  The server reindexes what it pulls, so agents find your edits without a manual reindex.
+- **With git: its own clone, synced through git** on the server's own timings: your edits are
+  pushed `GIT_PUSH_DELAY_S` after you stop typing, agents' edits arrive every
+  `GIT_PULL_INTERVAL_S`. The server reindexes what it pulls, so agents find your edits without
+  a manual reindex.
+- **Without git: the server's own folder.** The wiki and the server share the `vault-data`
+  volume and run as the same user. There is no sync step: the wiki reads the files agents write,
+  and the server's file watcher indexes your edit within seconds.
+- **Reserved names.** SilverBullet keeps its own files at the vault root: `CONFIG.md`,
+  `Library/`, `_plug/`, `.silverbullet*`. `MARKDOWN_VAULT_MCP_EXCLUDE` keeps them out of the index, so
+  agents do not find them in search or listings (reading one by its exact path still works), and with git they never reach the vault repo. Do not give a note one of these
+  names: it would not be indexed. Without git this exclusion is all that separates the wiki's
+  files from the notes.
 - **One login** through Authelia, the same as for MCP OAuth.
 - **Its settings live in this repo**, in `wiki/space/`: the page tree on the left, the fonts.
   They are copied in on every start, so change them here, not in the browser.
@@ -111,7 +151,8 @@ flowchart LR
   you["You, in a browser"]
   edge["Cloudflare edge<br/>TLS"]
   gemini["Google AI Studio<br/>gemini-embedding-2"]
-  repo[("GitHub<br/>owner/vault-repo")]
+  repo[("GitHub, optional<br/>owner/vault-repo")]
+  bucket[("S3-compatible bucket<br/>optional")]
 
   subgraph host["Docker host, compose project ram-brain"]
     cfd["cloudflared"]
@@ -120,9 +161,10 @@ flowchart LR
     proxy["wiki-proxy, Caddy<br/>WIKI_DOMAIN"]
     wiki["wiki, SilverBullet"]
     sync["wiki-sync"]
-    vault[("vault-data<br/>server clone")]
+    mirror["vault-mirror"]
+    vault[("vault-data<br/>the vault")]
     data[("app-data<br/>index + embeddings")]
-    wdata[("wiki-data<br/>wiki clone")]
+    wdata[("wiki-data<br/>wiki clone, with git")]
   end
 
   agents --> edge
@@ -138,9 +180,13 @@ flowchart LR
   mcp --- data
   wiki --- wdata
   sync --- wdata
+  wiki -. "without git" .- vault
+  mirror --- vault
   mcp <-->|"embed"| gemini
   mcp <-->|"commit, push, pull"| repo
   sync <-->|"commit, push, pull"| repo
+  mirror -->|"mirror + history"| bucket
+  bucket -. "fills an empty volume, without git" .-> mirror
 
   actions["GitHub Actions"] --> runner["self-hosted runner"]
   runner -. "docker compose up" .-> host
@@ -158,8 +204,21 @@ flowchart LR
   no second user system.
 - **A remote embedding model.** Gemini ranks paraphrased Russian questions far better than the
   local models we tried, and re-embedding costs API calls instead of the host's CPU.
-- **The wiki writes through git, never into the server's folder.** The server stays the only
-  writer of its own working tree, and both sides already resolve conflicts on pull.
+- **With git, the wiki writes through git, never into the server's folder.** The server stays
+  the only writer of its own working tree, and both sides already resolve conflicts on pull. A
+  second writer there would leave uncommitted files that block the server's rebase and never
+  reach its index.
+- **Without git, the wiki writes into the server's folder.** There is no rebase to block, and
+  the server's file watcher, which is on whenever git is off, indexes the change. A second copy
+  of the vault would have nothing to sync it.
+- **The volume is the vault; git and the bucket are add-ons.** Each can be turned on alone, and
+  an instance with neither still works.
+- **The bucket is a one-way mirror with history, not two-way sync.** One host writes the vault,
+  so nothing needs to come back from the bucket except a restore onto a new or wiped volume. Two-way
+  sync is fragile: it needs its own state on both sides and a rule for every conflict. A plain
+  mirror with the replaced and deleted files kept aside covers the same loss cases. The mirror
+  marks the volume it has seen: a wiped or swapped volume carries no mark and is never mirrored
+  over the copy, while a vault you emptied yourself is mirrored like any other change.
 - **No published ports, no Cloudflare Access.** TLS ends at Cloudflare's edge; authentication
   belongs to the MCP server and Authelia.
 
