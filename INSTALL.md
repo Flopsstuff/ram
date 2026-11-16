@@ -1,8 +1,10 @@
 # Install your own ram
 
 This recipe stands up a new, independent instance from scratch: its own vault, its own domains,
-its own host. Plan about an hour; most of it is waiting for DNS and the first deploy. What each
-piece does and why it is built this way is in [README.md](README.md).
+its own host. The result is one docker compose stack: you fill in the configuration once and
+run `docker compose up -d`. Nothing else is needed; deploying from GitHub Actions is optional
+and comes last (step 6). Plan about an hour; most of it is waiting for DNS. What each piece
+does and why it is built this way is in [README.md](README.md).
 
 > **Pick a storage mode first.** The vault always lives on the `vault-data` docker volume. A
 > git remote and a bucket are optional and independent, so there are four modes:
@@ -29,13 +31,13 @@ piece does and why it is built this way is in [README.md](README.md).
 | A GitHub account **(git only)** | Owns the vault repo. The fine-grained token in step 1 must belong to this same account: it can't reach a repo where it is only a collaborator. |
 | An S3-compatible bucket **(bucket only)** | Google Cloud Storage, DigitalOcean Spaces, AWS S3, Cloudflare R2 or MinIO. Step 2.4. |
 | A Google AI Studio API key | For `gemini-embedding-2`. Create one at <https://aistudio.google.com/apikey>. |
-| On your laptop | `git`, `gh` (logged in), `docker`, `cloudflared`, `openssl`. |
+| Where you prepare the configuration (the host itself, or a laptop) | `git`, `docker`, `cloudflared`, `openssl`. Also `gh`, logged in, for the git mode and for step 6. |
 
 ## 1. Repositories
 
-1. **Infra repo.** Copy this repository under your account (fork it, or create a new repo and
-   push this one into it). Real configuration never lands in git, only the `*.example`
-   templates, so the repo can stay public.
+1. **Infra repo.** Clone this repository onto the host. Fork it first if you want to deploy
+   from GitHub Actions (step 6) or keep changes of your own. Real configuration never lands in
+   git, only the `*.example` templates, so a fork can stay public.
 2. **Vault repo (git only).** Create a private repo with one first commit:
    ```bash
    gh repo create <owner>/<vault-repo> --private --add-readme
@@ -70,6 +72,7 @@ Copy `.env.example` to `.env` and fill in:
 | `MARKDOWN_VAULT_MCP_INSTRUCTIONS_EXTRA` | your rules for agents: language, search habits, when to offer saving knowledge. Keep both under ~500 characters in total: Claude Code cuts a server's instructions at 2,048 |
 | `MARKDOWN_VAULT_MCP_OIDC_*` | step 2.2 |
 | `CF_TUNNEL_ID`, `TUNNEL_CRED_CONTENTS` | step 2.3 |
+| `OKF_MAINTENANCE_AT` (optional) | when the daily OKF upkeep runs: `HH:MM` in UTC, or in `TZ` if you set it. Unset means `02:30`; `off` disables it |
 
 Leave `AUTH_MODE` unset. With both the bearer token and the OIDC block present, the server
 enables both login paths by itself.
@@ -191,42 +194,48 @@ not copy it into `<prefix>/vault/`: the bucket is a one-way copy, an object chan
 not reach the running server, and the next pass replaces it. A version exists only if a mirror
 pass saw it: two edits between two passes leave one history entry, not two.
 
-## 3. Host and runner
+## 3. Start
 
-1. Install Docker on the host. The user that runs the GitHub runner must be able to run
-   `docker`.
-2. Register a self-hosted runner for **your** infra repo: *Settings → Actions → Runners →
-   New self-hosted runner*, and follow the commands GitHub shows. Install it as a service so it
-   comes back after a reboot.
-
-## 4. GitHub secrets
-
-The deploy job rebuilds every gitignored file from a secret on each run:
+On the host, in your clone, with the four configuration files in place (`.env`,
+`cloudflared/config.yml`, `authelia/configuration.yml`, `authelia/users_database.yml`):
 
 ```bash
-gh secret set DOTENV             < .env
-gh secret set CLOUDFLARED_CONFIG < cloudflared/config.yml
-gh secret set AUTHELIA_CONFIG    < authelia/configuration.yml
-gh secret set AUTHELIA_USERS     < authelia/users_database.yml
+docker compose up -d
 ```
 
-From now on, a config change means: edit the file, update its secret, deploy. The runner
-reads the secret, not your local file.
+That is the whole install. On its first start with git the server clones the vault and embeds
+it: seconds for a fresh vault, one embedding call per section for a big one. The wiki makes its
+own clone next to it. Without git the vault starts empty, or is first filled from the bucket if
+the bucket has a copy, and the wiki opens the same folder.
 
-## 5. First deploy
+**Day to day**, all on the host, in the clone:
+
+| To | Run |
+| --- | --- |
+| apply a changed `.env` | `docker compose up -d` |
+| apply a changed config file or script | `docker compose up -d --force-recreate <service>`. Compose does not notice that a mounted file changed, so a plain `up -d` keeps the old one |
+| update to the newest images | `docker compose pull`, then `docker compose up -d`. Nothing does this for you |
+| take a new version of this repo | `git pull`, then `docker compose up -d --force-recreate` |
+| read a service's log | `docker compose logs -f <service>` |
+| stop | `docker compose down`. The data stays in the volumes; `down -v` deletes it |
+
+**OKF upkeep.** The `okf-maintenance` service tidies the vault once a day, at
+`OKF_MAINTENANCE_AT`: wikilinks the wiki inserts become markdown links, links the wiki left
+without `.md` get it back, every folder's `index.md` is regenerated, and an audit lists notes
+that break the format and links that lead nowhere. The report is in its log:
 
 ```bash
-gh workflow run deploy.yml
-gh run watch
+docker compose logs okf-maintenance
 ```
 
-Every later push to `main` deploys too; put `[skip ci]` in a commit message to skip one. On
-its first start with git the server clones the vault and embeds it: seconds for a fresh vault,
-one embedding call per section for a big one. The wiki makes its own clone next to it. Without
-git the vault starts empty, or is first filled from the bucket if the bucket has a copy, and
-the wiki opens the same folder.
+To run it now and see the report:
 
-## 6. Verify
+```bash
+docker compose exec okf-maintenance \
+  python /etc/ram/scripts/okf_maintenance.py
+```
+
+## 4. Verify
 
 | Check | Expect |
 | --- | --- |
@@ -237,8 +246,9 @@ the wiki opens the same folder.
 | `https://<WIKI_DOMAIN>` in a browser | the Authelia login, then the vault with its page tree on the left |
 | `docker compose logs vault-mirror` on the host **(bucket only)** | `running: mirror to …`, and no `mirror pass failed` after it |
 | `docker compose logs wiki-sync` on the host, if the wiki does not come up | a line that says which `WIKI_VOLUME` setting it expects |
+| `docker compose logs okf-maintenance` on the host | `next run at …` |
 
-## 7. Connect agents
+## 5. Connect agents
 
 - **Claude Code**, for every project of the user:
   ```bash
@@ -258,9 +268,41 @@ Both fixes go into the `ram-brain` client in `authelia/configuration.yml`:
 - **`invalid_client` at the token exchange.** The server authenticates with HTTP Basic. Set
   `token_endpoint_auth_method: 'client_secret_basic'`.
 
+## 6. Deploy from GitHub Actions (optional)
+
+`.github/workflows/deploy.yml` runs the same `docker compose` for you, on a self-hosted runner
+on the host: on every push to `main` of your fork, on demand, and once a week to refresh the
+images. Skip this step and the stack works the same; you then update it by hand (step 3).
+
+1. **Runner.** Register a self-hosted runner for **your** fork: *Settings → Actions → Runners →
+   New self-hosted runner*, and follow the commands GitHub shows. Install it as a service so it
+   comes back after a reboot. Its user must be able to run `docker`.
+2. **Secrets.** The deploy job starts from a clean checkout, so it rebuilds every gitignored
+   file from a secret on each run:
+
+   ```bash
+   gh secret set DOTENV             < .env
+   gh secret set CLOUDFLARED_CONFIG < cloudflared/config.yml
+   gh secret set AUTHELIA_CONFIG    < authelia/configuration.yml
+   gh secret set AUTHELIA_USERS     < authelia/users_database.yml
+   ```
+
+3. **First deploy.**
+
+   ```bash
+   gh workflow run deploy.yml
+   gh run watch
+   ```
+
+From now on a config change means: edit the file, update its secret, deploy. The runner reads
+the secret, not your local file. Every push to `main` deploys too; put `[skip ci]` in a commit
+message to skip one. A stack you started by hand keeps its data when the runner takes over: the
+compose project, and so the volumes, are the same.
+
 ## Rotating credentials
 
-Change the value, update its GitHub secret, deploy.
+Change the value and apply it as in step 3. If you deploy from GitHub: update the secret and
+deploy.
 
 | Rotate | Effect |
 | --- | --- |
@@ -289,9 +331,9 @@ users:
     groups: ['wiki']
 ```
 
-To add someone: edit `authelia/users_database.yml`, run
-`gh secret set AUTHELIA_USERS < authelia/users_database.yml`, deploy. The deploy recreates
-Authelia, which then reads the new file.
+To add someone: edit `authelia/users_database.yml`, then
+`docker compose up -d --force-recreate authelia`, so Authelia reads the new file. If you deploy
+from GitHub: `gh secret set AUTHELIA_USERS < authelia/users_database.yml`, then deploy.
 
 **Who gets in.** With the shipped `default_policy: one_factor`, every user in the file can log
 in to both the wiki and MCP over OAuth. To narrow it:
@@ -318,8 +360,8 @@ Configure an SMTP notifier to get self-service resets and two-factor (TOTP) enro
 
 - **Compose project name.** Give the second instance a different `name:` in its
   `docker-compose.yml`. With the same name, the two stacks would share containers and volumes.
-- **Runner.** The second instance needs its own runner checkout. Also rename the workflow's
-  `concurrency.group`, so the two deploys are not queued as one.
+- **Runner**, if you deploy from GitHub. The second instance needs its own runner checkout.
+  Also rename the workflow's `concurrency.group`, so the two deploys are not queued as one.
 - **Bucket.** Two instances can share one bucket only with different `BUCKET_PREFIX` values.
 - **Tunnel and Authelia.** Separate ones are simplest. Sharing them works, but then a change to
   one instance can break the other.

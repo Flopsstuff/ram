@@ -24,7 +24,7 @@ login.
 | **Search** | semantic by default on `gemini-embedding-2` (Google AI Studio), with note title and heading context |
 | **Vault** | a docker volume. Optional: a private GitHub repo `<owner>/<vault-repo>`, cloned and managed read-write by the server, and a copy in an S3-compatible bucket |
 | **Ingress** | Cloudflare Tunnel, three hostnames, no published ports |
-| **Deploy** | push to `main` → GitHub Actions → self-hosted runner → `docker compose` |
+| **Run** | fill in the configuration once, then `docker compose up -d`. Optional: push to `main` → GitHub Actions → self-hosted runner |
 
 **Install your own:** [INSTALL.md](INSTALL.md).
 
@@ -39,6 +39,7 @@ login.
 | `wiki-sync` | Prepares the wiki's folder. With git: commits and pushes your edits, pulls the agents'. Without: copies the wiki settings in and idles |
 | `wiki-proxy` | Caddy: asks Authelia about every wiki request |
 | `vault-mirror` | rclone: mirrors the vault to an S3-compatible bucket and keeps replaced and deleted files as history. Idles when no bucket is set |
+| `okf-maintenance` | Once a day: turns wikilinks left by the wiki into OKF links, regenerates every folder's `index.md`, and reports notes that break the format and links that lead nowhere |
 
 ### Storage modes
 
@@ -112,15 +113,27 @@ optional add-ons, both chosen in `.env`:
 
 ## Install
 
-Step by step, from an empty GitHub account to connected agents: **[INSTALL.md](INSTALL.md)**.
+Step by step, from an empty host to connected agents: **[INSTALL.md](INSTALL.md)**.
 
-## Deploying
+## Running
 
-`.github/workflows/deploy.yml` deploys on every push to `main` (put `[skip ci]` in the commit
-message to skip) and refreshes the images weekly. A second workflow, `okf-maintenance.yml`, runs
-nightly: it turns wikilinks left by the wiki into OKF links, regenerates every folder's
-`index.md` and fails if a note breaks the format or a link breaks. The gitignored config files are rebuilt from
-GitHub secrets on every run:
+The whole service is one docker compose stack. Fill in the four configuration files once
+(`.env`, `cloudflared/config.yml`, `authelia/configuration.yml`, `authelia/users_database.yml`,
+each from its `*.example` template) and start it on any host with Docker:
+
+```bash
+docker compose up -d
+```
+
+Everything the service does on a schedule runs inside the stack: git sync, the bucket mirror,
+and the daily OKF upkeep, whose report is in `docker compose logs okf-maintenance`. Updating
+the images is the one thing left to you: `docker compose pull`, then `docker compose up -d`.
+
+### Deploying from GitHub Actions (optional)
+
+`.github/workflows/deploy.yml` runs that same compose stack from a self-hosted runner: on every
+push to `main` (put `[skip ci]` in the commit message to skip) and once a week to refresh the
+images. The gitignored config files are rebuilt from GitHub secrets on every run:
 
 | Secret | Becomes |
 | --- | --- |
@@ -162,6 +175,7 @@ flowchart LR
     wiki["wiki, SilverBullet"]
     sync["wiki-sync"]
     mirror["vault-mirror"]
+    okf["okf-maintenance"]
     vault[("vault-data<br/>the vault")]
     data[("app-data<br/>index + embeddings")]
     wdata[("wiki-data<br/>wiki clone, with git")]
@@ -182,13 +196,14 @@ flowchart LR
   sync --- wdata
   wiki -. "without git" .- vault
   mirror --- vault
+  okf -. "MCP, once a day" .-> mcp
   mcp <-->|"embed"| gemini
   mcp <-->|"commit, push, pull"| repo
   sync <-->|"commit, push, pull"| repo
   mirror -->|"mirror + history"| bucket
   bucket -. "fills an empty volume, without git" .-> mirror
 
-  actions["GitHub Actions"] --> runner["self-hosted runner"]
+  actions["GitHub Actions<br/>optional"] --> runner["self-hosted runner"]
   runner -. "docker compose up" .-> host
 ```
 

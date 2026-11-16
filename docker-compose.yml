@@ -9,6 +9,7 @@
 #   wiki-proxy         : SilverBullet in the browser (own vault clone with git,
 #                        the server's volume without)
 #   vault-mirror       : optional copy of the vault in an S3-compatible bucket
+#   okf-maintenance    : daily upkeep of the vault's OKF links and indexes
 #
 # Storage modes, all set in .env (see .env.example): the vault-data volume
 # alone; plus a git remote; plus a bucket; or git and a bucket together.
@@ -101,6 +102,37 @@ services:
     networks:
       - brain
     # NOTE: intentionally no `ports:` — it only dials out to the bucket.
+
+  # Daily OKF upkeep (scripts/okf_maintenance.py): wikilinks the wiki inserts
+  # become markdown links, extensionless links get their `.md`, every folder's
+  # index.md is regenerated, then an audit; the report goes to this
+  # container's log. It works through the server's MCP tools over the compose
+  # network, so it needs no volume, and it is the server's own image (Python
+  # and the MCP client are already in it). It gets only the variables it
+  # reads, not the whole .env. Idle when OKF_MAINTENANCE_AT or the server's
+  # OKF mode is `off`.
+  #   run now:  docker compose exec okf-maintenance python /etc/ram/scripts/okf_maintenance.py
+  okf-maintenance:
+    image: ghcr.io/pvliesdonk/markdown-vault-mcp:latest
+    restart: unless-stopped
+    init: true                          # python as PID 1 would ignore SIGTERM
+    user: "1000:1000"
+    entrypoint: ["python", "/etc/ram/scripts/okf_maintenance.py", "--schedule"]
+    environment:
+      OKF_MCP_URL: http://markdown-vault-mcp:8000/mcp
+      MARKDOWN_VAULT_MCP_BEARER_TOKEN: ${MARKDOWN_VAULT_MCP_BEARER_TOKEN:-}
+      MARKDOWN_VAULT_MCP_OKF_MODE: ${MARKDOWN_VAULT_MCP_OKF_MODE:-}
+      OKF_MAINTENANCE_AT: ${OKF_MAINTENANCE_AT:-02:30}   # HH:MM, or `off`
+      TZ: ${TZ:-UTC}
+    volumes:
+      - ./scripts:/etc/ram/scripts:ro
+    healthcheck:
+      disable: true                     # the image's own check probes a server on localhost
+    depends_on:
+      - markdown-vault-mcp
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:`.
 
   cloudflared:
     image: cloudflare/cloudflared:latest

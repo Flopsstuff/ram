@@ -1,12 +1,28 @@
-"""Nightly OKF upkeep for the vault, run inside the markdown-vault-mcp container.
+"""OKF upkeep for the vault: the `okf-maintenance` service in docker-compose.yml.
 
-`.github/workflows/okf-maintenance.yml` pipes this file into
-`docker compose exec -T markdown-vault-mcp python -`. It talks to the server
-over MCP on localhost with the bearer token from the container's own
-environment, so every change goes through the server: committed, pushed and
-reindexed like any agent's write. Nothing here touches the vault's files.
+It talks to the MCP server over the compose network with the bearer token, so
+every change goes through the server: indexed, and with git committed and
+pushed, like any agent's write. Nothing here touches the vault's files, and
+it works the same in every storage mode.
 
-Steps:
+Two ways to run it:
+
+    python okf_maintenance.py --schedule   what the service does: wait for
+                                           OKF_MAINTENANCE_AT, run, repeat
+    python okf_maintenance.py              one run now; prints the report
+
+Environment:
+    MARKDOWN_VAULT_MCP_BEARER_TOKEN   the server's bearer token (required)
+    OKF_MCP_URL                       the server's MCP endpoint
+                                      (default http://127.0.0.1:8000/mcp)
+    OKF_MAINTENANCE_AT                daily run time, HH:MM in the container's
+                                      time zone (UTC unless TZ is set);
+                                      `off` = never. Default 02:30
+    MARKDOWN_VAULT_MCP_OKF_MODE       `off` = the service idles
+    OKF_MAINTENANCE_RETRY_S           wait before a retry when the server
+                                      cannot be reached (default 600)
+
+Steps of a run:
 1. `okf_convert_links`: wikilinks (the wiki's editor still inserts them)
    become root-relative markdown links.
 2. Markdown links without `.md`: SilverBullet rewrites links that way when a
@@ -15,22 +31,23 @@ Steps:
    `%20` and `<...>` brackets are dropped.
 3. `okf_generate_index` for the root and every folder. A call on the root only
    creates missing indexes, it never refreshes an existing one, so each folder
-   gets its own call. Unchanged indexes produce no commit.
-4. `okf_validate` and `get_broken_links`: the summary is printed as markdown
-   for the job summary, and the exit code is non-zero if a note lacks `type`,
-   frontmatter does not parse, an index carries frontmatter, or a link is
-   broken.
+   gets its own call. Unchanged indexes are not rewritten.
+4. `okf_validate` and `get_broken_links`: the report, printed as markdown.
+
+Exit code of a run: 0 clean; 1 the audit found something (a note lacks `type`,
+frontmatter does not parse, an index carries frontmatter, or a link is
+broken); 2 the run itself failed (server unreachable, no token).
 """
 
 import asyncio
 import json
 import os
+import subprocess
 import sys
+import time
 
-from fastmcp import Client
-from fastmcp.client.transports import StreamableHttpTransport
-
-URL = "http://127.0.0.1:8000/mcp"
+URL = os.environ.get("OKF_MCP_URL", "http://127.0.0.1:8000/mcp")
+ATTEMPTS = 3
 
 
 def _payload(result):
@@ -52,7 +69,13 @@ def _with_md(raw: str) -> str:
 
 
 async def main() -> int:
-    token = os.environ["MARKDOWN_VAULT_MCP_BEARER_TOKEN"]
+    # Imported here so the scheduler, which only sleeps, stays a small process.
+    from fastmcp import Client
+    from fastmcp.client.transports import StreamableHttpTransport
+
+    token = os.environ.get("MARKDOWN_VAULT_MCP_BEARER_TOKEN", "")
+    if not token:
+        raise RuntimeError("MARKDOWN_VAULT_MCP_BEARER_TOKEN is not set")
     transport = StreamableHttpTransport(URL, headers={"Authorization": f"Bearer {token}"})
     out = ["## OKF maintenance", ""]
 
@@ -60,6 +83,10 @@ async def main() -> int:
 
         async def call(tool, **args):
             return _payload(await client.call_tool(tool, args))
+
+        if "okf_validate" not in {tool.name for tool in await client.list_tools()}:
+            print("The server offers no OKF tools (is MARKDOWN_VAULT_MCP_OKF_MODE off?); nothing to do.")
+            return 0
 
         # 1. Wikilinks -> markdown links.
         converted = await call("okf_convert_links")
@@ -128,4 +155,80 @@ async def main() -> int:
     return 1 if failures or broken else 0
 
 
-sys.exit(asyncio.run(main()))
+def run_once() -> int:
+    try:
+        return asyncio.run(main())
+    except Exception as error:  # the server is down, the token is wrong, ...
+        print(f"OKF maintenance could not run: {type(error).__name__}: {error}", file=sys.stderr)
+        return 2
+
+
+# --- The service: one run a day at OKF_MAINTENANCE_AT ---
+
+
+def _log(message: str) -> None:
+    print(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} okf-maintenance: {message}", flush=True)
+
+
+def _idle(reason: str) -> None:
+    _log(f"{reason}; idle")
+    while True:
+        time.sleep(3600)
+
+
+def _parse_at(value: str):
+    """`02:30` -> (2, 30); anything else -> None."""
+    hour, sep, minute = value.partition(":")
+    if not (sep and hour.isdigit() and minute.isdigit()):
+        return None
+    hour, minute = int(hour), int(minute)
+    return (hour, minute) if hour < 24 and minute < 60 else None
+
+
+def _next_run(hour: int, minute: int, now: float) -> float:
+    """The next HH:MM, local time, strictly after `now`."""
+    day = time.localtime(now)
+    for offset in (0, 1):  # mktime normalises a day past the end of the month
+        target = time.mktime((day.tm_year, day.tm_mon, day.tm_mday + offset, hour, minute, 0, 0, 0, -1))
+        if target > now:
+            return target
+    return target
+
+
+def schedule() -> None:
+    if os.environ.get("MARKDOWN_VAULT_MCP_OKF_MODE", "").strip().lower() == "off":
+        _idle("MARKDOWN_VAULT_MCP_OKF_MODE is off")
+    if not os.environ.get("MARKDOWN_VAULT_MCP_BEARER_TOKEN"):
+        _idle("MARKDOWN_VAULT_MCP_BEARER_TOKEN is not set, so the server cannot be reached")
+    at = os.environ.get("OKF_MAINTENANCE_AT", "").strip() or "02:30"
+    if at.lower() == "off":
+        _idle("OKF_MAINTENANCE_AT is off")
+    parsed = _parse_at(at)
+    if parsed is None:
+        _idle(f"OKF_MAINTENANCE_AT='{at}' is not HH:MM")
+    retry = int(os.environ.get("OKF_MAINTENANCE_RETRY_S", "600"))
+
+    while True:
+        target = _next_run(*parsed, time.time())
+        _log(f"next run at {time.strftime('%Y-%m-%d %H:%M %Z', time.localtime(target))}")
+        # Short naps, so a clock that jumps (NTP, a suspended host) is noticed.
+        while (left := target - time.time()) > 0:
+            time.sleep(min(left, 300))
+        for attempt in range(1, ATTEMPTS + 1):
+            # A child process: the report goes to this container's log, and the
+            # MCP client's memory is given back between runs.
+            code = subprocess.run([sys.executable, os.path.abspath(__file__)]).returncode
+            if code != 2:
+                break
+            if attempt < ATTEMPTS:
+                _log(f"run failed (a deploy in progress?); retrying in {retry}s")
+                time.sleep(retry)
+        result = {0: "clean", 1: "the audit found problems, see the report above"}.get(code, "failed")
+        _log(f"run finished: {result}")
+
+
+if __name__ == "__main__":
+    if "--schedule" in sys.argv[1:]:
+        schedule()
+    else:
+        sys.exit(run_once())
