@@ -114,6 +114,11 @@ git_busy() {
     [ -e "$DIR/.git/rebase-merge" ] || [ -e "$DIR/.git/rebase-apply" ]
 }
 
+# Changes whenever git rewrites the tree: a pull, a rebase, a commit.
+git_stamp() {
+  stat -c '%n %Y %s' "$DIR/.git/index" "$DIR/.git/HEAD" "$DIR/.git/ORIG_HEAD" 2>/dev/null
+}
+
 last_err() { tail -1 /tmp/lsf.err | cut -c1-300; }
 
 # Prints the top level of the bucket copy. Fails when the bucket cannot be
@@ -206,7 +211,9 @@ may_mirror() {
 }
 
 mirror_pass() {
+  ran=0
   may_mirror || return 0
+  ran=1
   stamp=$(date -u +%Y-%m-%dT%H%M%SZ)
   # .git: history lives in the git remote. _plug and .silverbullet*: the wiki
   # rebuilds them, and they would fill the history with noise. One attempt:
@@ -243,9 +250,38 @@ prune_history() {
   done
 }
 
+# With git the server pulls and rebases on its own clock, and nothing here can
+# lock it out: the check before a pass says nothing about the seconds the pass
+# takes. A pass that git overlapped has copied a tree in motion, so it is
+# taken again a few seconds later, once git is done, instead of leaving the
+# copy wrong until the next interval. A pass skipped because git was busy is
+# retried the same way.
+mirror_round() {
+  tries=1
+  while :; do
+    before=$(git_stamp)
+    mirror_pass
+    [ -n "$GIT_URL" ] || return 0
+    if git_busy; then
+      why="git started work during the pass"
+    elif [ "$ran" -eq 1 ] && [ "$(git_stamp)" != "$before" ]; then
+      why="git changed the tree during the pass"
+    else
+      return 0
+    fi
+    if [ "$tries" -ge 3 ]; then
+      [ "$ran" -eq 1 ] && log "$why; leaving it to the next pass"
+      return 0
+    fi
+    [ "$ran" -eq 1 ] && log "$why; mirroring again"
+    tries=$((tries + 1))
+    sleep 5
+  done
+}
+
 next_prune=0
 while :; do
-  mirror_pass
+  mirror_round
   now=$(date +%s)
   if [ "$now" -ge "$next_prune" ]; then
     prune_history

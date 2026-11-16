@@ -226,7 +226,11 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     broken bucket setting costs the copy and a line in the log, never the service.
   - **With git, a pass is skipped while git is at work** (`git_busy`: no `.git/HEAD` yet,
     `index.lock`, a rebase in progress). A pass taken in the middle of a clone or a rebase
-    would file the files git has not written yet under `history/`.
+    would file the files git has not written yet under `history/`. That check is one moment
+    before the pass, and the script cannot lock the server's git out, so it also compares
+    git's state (`git_stamp`: `.git/index`, `HEAD`, `ORIG_HEAD`) before and after: a pass
+    that git overlapped, or one skipped because git was busy, is taken again 5 s later, three
+    times at most, instead of leaving a tree in motion in the bucket until the next interval.
   - **rclone is configured by env only**: the script exports `RCLONE_CONFIG_STORE_*` from the
     `BUCKET_*` variables and points `RCLONE_CONFIG` at an empty file, so no secret is on disk
     and there is no config file or extra GitHub secret. The remote exists only inside the
