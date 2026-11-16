@@ -2,11 +2,16 @@
 # Central shared-brain MCP server + Cloudflare Tunnel ingress.
 # See the "Design rationale" section of README.md for the full rationale.
 #
-#   markdown-vault-mcp : the MCP server (managed git, FastEmbed, HTTP transport)
+#   markdown-vault-mcp : the MCP server (HTTP transport; managed git when configured)
 #   cloudflared        : Cloudflare Tunnel (Method B, locally-managed config)
 #   authelia           : OIDC provider for MCP OAuth + forward-auth for the wiki
 #   wiki, wiki-sync,
-#   wiki-proxy         : SilverBullet in the browser on its own vault clone
+#   wiki-proxy         : SilverBullet in the browser (own vault clone with git,
+#                        the server's volume without)
+#   vault-mirror       : optional copy of the vault in an S3-compatible bucket
+#
+# Storage modes, all set in .env (see .env.example): the vault-data volume
+# alone; plus a git remote; plus a bucket; or git and a bucket together.
 #
 # No container publishes ports to the host. The ONLY ingress is via cloudflared.
 
@@ -53,16 +58,46 @@ services:
     environment:
       PYTHONPATH: /etc/ram/patches   # loads patches/sitecustomize.py (see the mount below)
     volumes:
-      - vault-data:/vault                              # git-managed vault clone (persistent)
+      - vault-data:/vault                              # the vault: a git clone with git, a plain folder without
       - app-data:/data                                 # FTS index + embeddings + session state (NOT in git)
       # Startup patch (patches/sitecustomize.py, imported by Python at start via
       # PYTHONPATH): fills the `index` Gemini's OpenAI-compat endpoint omits on
       # the first embedding, without which batch indexing dies with TypeError.
       # Remove both lines once the upstream fix ships.
       - ./patches:/etc/ram/patches:ro
+    # An empty volume may first be filled from the bucket (vault-mirror).
+    depends_on:
+      vault-mirror:
+        condition: service_healthy
     networks:
       - brain
     # NOTE: intentionally no `ports:` — reachable only through cloudflared.
+
+  # Copy of the vault in an S3-compatible bucket (mirror/mirror.sh), driven by
+  # the BUCKET_* variables in .env. With BUCKET_NAME unset it reports ready and
+  # idles. Mirrors /vault to the bucket on a timer, keeps replaced and deleted
+  # versions under history/, and, in the modes without git, fills an EMPTY
+  # volume from the bucket before the server and the wiki start: both wait for
+  # this healthcheck. The long start_period covers a large restore.
+  vault-mirror:
+    image: rclone/rclone:1.76
+    restart: unless-stopped
+    init: true                          # sh as PID 1 would ignore SIGTERM
+    entrypoint: ["sh", "/etc/mirror/mirror.sh"]
+    env_file:
+      - .env
+    volumes:
+      - vault-data:/vault
+      - ./mirror/mirror.sh:/etc/mirror/mirror.sh:ro
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/mirror-ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 30m
+    networks:
+      - brain
+    # NOTE: intentionally no `ports:` — it only dials out to the bucket.
 
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -105,15 +140,20 @@ services:
 
   # --- Wiki: browse and edit the vault in a browser at <WIKI_DOMAIN> ---
   # cloudflared → wiki-proxy (Authelia forward-auth) → wiki (SilverBullet).
-  # The wiki works on its OWN clone of the vault (wiki-data), never on the MCP
-  # server's /vault: a second writer in that working tree would block the
-  # server's rebase and bypass its index. wiki-sync commits browser edits and
-  # pushes them to the vault repo; the MCP server picks them up on its next
-  # pull and reindexes them itself.
+  # WIKI_VOLUME in .env picks the folder the wiki works on:
+  #   wiki-data (default, with git): its OWN clone of the vault, never the MCP
+  #     server's /vault: a second writer in that working tree would block the
+  #     server's rebase and bypass its index. wiki-sync commits browser edits
+  #     and pushes them to the vault repo; the server picks them up on its next
+  #     pull and reindexes them itself.
+  #   vault-data (without git): the server's own volume. There is no rebase to
+  #     block, and the server's file watcher reindexes browser edits.
+  # wiki-sync refuses to start on a pairing that does not match the git setting.
 
-  # Git side of the wiki: clones the vault into wiki-data on first start, then
-  # commits + pushes edits and pulls agents' changes, on the MCP server's own
-  # GIT_PUSH_DELAY_S / GIT_PULL_INTERVAL_S (see wiki/sync.sh).
+  # Prepares the wiki's folder (see wiki/sync.sh). With git: clones the vault
+  # into wiki-data on first start, then commits + pushes edits and pulls
+  # agents' changes, on the MCP server's own GIT_PUSH_DELAY_S /
+  # GIT_PULL_INTERVAL_S. Without git: copies the wiki settings in and idles.
   wiki-sync:
     image: alpine/git:latest
     restart: unless-stopped
@@ -121,13 +161,19 @@ services:
     env_file:
       - .env
     volumes:
-      - wiki-data:/data
+      - ${WIKI_VOLUME:-wiki-data}:/data
       - ./wiki/sync.sh:/etc/wiki/sync.sh:ro
       - ./wiki/space:/etc/wiki/space:ro   # wiki settings + style, copied in on start
-    # SilverBullet must not start on an empty folder (it would set up a fresh
-    # space there and the clone would refuse the non-empty directory).
+    # On the shared volume a restore from the bucket has to come first.
+    depends_on:
+      vault-mirror:
+        condition: service_healthy
+    # SilverBullet must not start before the folder is ready: on an empty one
+    # it would set up a fresh space, and the clone would then refuse the
+    # non-empty directory. sync.sh creates this file once the clone and the
+    # settings are in place.
     healthcheck:
-      test: ["CMD", "test", "-d", "/data/.git"]
+      test: ["CMD", "test", "-f", "/tmp/wiki-ready"]
       interval: 5s
       timeout: 3s
       retries: 60
@@ -146,7 +192,7 @@ services:
       SB_INDEX_PAGE: README     # the vault has no index.md; open its README
       SB_NAME: ram wiki         # app name in the web manifest (installed PWA)
     volumes:
-      - wiki-data:/data
+      - ${WIKI_VOLUME:-wiki-data}:/data
     depends_on:
       wiki-sync:
         condition: service_healthy
@@ -178,4 +224,4 @@ volumes:
   vault-data:
   app-data:
   authelia-data:   # Authelia SQLite + notifications (must persist across CD git clean)
-  wiki-data:       # the wiki's own clone of the vault (SilverBullet + wiki-sync)
+  wiki-data:       # the wiki's own clone of the vault (SilverBullet + wiki-sync); unused without git

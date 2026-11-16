@@ -1,7 +1,16 @@
 #!/bin/sh
-# wiki-sync: keeps the wiki's working copy of the vault in step with the vault
-# repo on GitHub, so edits made in the browser reach the MCP server through git
-# and agents' edits reach the browser.
+# wiki-sync: prepares the folder SilverBullet works on, in one of two modes
+# picked by MARKDOWN_VAULT_MCP_GIT_REPO_URL, the same switch the MCP server uses.
+#
+# Without git (URL unset; WIKI_VOLUME=vault-data): the wiki works directly on
+# the server's own vault volume. This script only hands a fresh volume to the
+# server's user, copies the wiki settings in and idles; the server's file
+# watcher picks browser edits up by itself.
+#
+# With git (URL set; WIKI_VOLUME unset or wiki-data): keeps the wiki's own
+# working copy of the vault in step with the vault repo on GitHub, so edits
+# made in the browser reach the MCP server through git and agents' edits reach
+# the browser.
 #
 # It reuses the MCP server's own git settings from .env, so both writers behave
 # the same way:
@@ -29,14 +38,60 @@ PULL_INTERVAL=${MARKDOWN_VAULT_MCP_GIT_PULL_INTERVAL_S:-300}
 TICK=5
 RETRY=30
 
+READY=/tmp/wiki-ready            # the healthcheck; the wiki waits for it
+URL="${MARKDOWN_VAULT_MCP_GIT_REPO_URL:-}"
+VOLUME="${WIKI_VOLUME:-wiki-data}"
+
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) wiki-sync: $*"; }
+
+# A wrong pairing is refused, slowly, so the restart loop stays readable.
+refuse() { log "$*"; sleep "$RETRY"; exit 1; }
+
+# Wiki settings and style from the infra repo (wiki/space/, mounted read-only):
+# copied over on every start, so the repo is their source of truth. With git
+# they land only on excluded paths (CONFIG.md, Library/), never in the vault
+# repo. The copies go to the folder's owner, so SilverBullet, which runs as
+# that user, can still write next to them (libraries it installs).
+copy_settings() {
+  [ -d /etc/wiki/space ] || return 0
+  cp -R /etc/wiki/space/. "$DIR"/
+  owner=$(stat -c %u:%g "$DIR")
+  for item in /etc/wiki/space/* /etc/wiki/space/.[!.]*; do
+    [ -e "$item" ] && chown -R "$owner" "$DIR/$(basename "$item")"
+  done
+  log "wiki settings copied in"
+}
+
+rm -f "$READY"
+
+# --- Without git: the wiki shares the server's vault volume ---
+if [ -z "$URL" ]; then
+  [ "$VOLUME" = vault-data ] ||
+    refuse "no git remote is set, so the wiki must share the server's volume: set WIKI_VOLUME=vault-data"
+  [ -d "$DIR/.git" ] && log "note: $DIR has a .git folder; without a remote the server commits locally only"
+  # A fresh named volume is root-owned. The MCP server runs as PUID:PGID and
+  # SilverBullet takes its user from the folder's owner, so the folder has to
+  # change hands before either starts writing.
+  if [ "$(stat -c %u "$DIR")" = 0 ]; then
+    chown -R "${PUID:-1000}:${PGID:-1000}" "$DIR"
+  fi
+  copy_settings
+  touch "$READY"
+  log "running without git on the server's volume; nothing to sync"
+  while :; do sleep 3600; done
+fi
+
+# --- With git: own clone, synced through the vault repo ---
+# The server's working tree must have one writer only: a second one would
+# block its rebase and bypass its index.
+[ "$VOLUME" = wiki-data ] ||
+  refuse "a git remote is set, so the wiki needs its own clone: leave WIKI_VOLUME unset (wiki-data), not '$VOLUME'"
+
 export GIT_USERNAME="${MARKDOWN_VAULT_MCP_GIT_USERNAME:-x-access-token}"
 export GIT_TOKEN="${MARKDOWN_VAULT_MCP_GIT_TOKEN:?MARKDOWN_VAULT_MCP_GIT_TOKEN is not set}"
-URL="${MARKDOWN_VAULT_MCP_GIT_REPO_URL:?MARKDOWN_VAULT_MCP_GIT_REPO_URL is not set}"
 NAME="${MARKDOWN_VAULT_MCP_GIT_COMMIT_NAME:-ram} (wiki)"
 EMAIL="${MARKDOWN_VAULT_MCP_GIT_COMMIT_EMAIL:?MARKDOWN_VAULT_MCP_GIT_COMMIT_EMAIL is not set}"
 HELPER='!f() { echo "username=${GIT_USERNAME}"; echo "password=${GIT_TOKEN}"; }; f'
-
-log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) wiki-sync: $*"; }
 
 if [ ! -d "$DIR/.git" ]; then
   if [ -n "$(ls -A "$DIR")" ]; then
@@ -62,13 +117,8 @@ _plug/
 .silverbullet*
 EOF
 
-# Wiki settings and style from the infra repo (wiki/space/, mounted read-only):
-# copied over on every start, so the repo is their source of truth. They land
-# only on excluded paths (CONFIG.md, Library/), never in the vault repo.
-if [ -d /etc/wiki/space ]; then
-  cp -R /etc/wiki/space/. "$DIR"/
-  log "wiki settings copied in"
-fi
+copy_settings
+touch "$READY"
 
 # Rebase local commits onto the remote, then push. Returns non-zero, with the
 # rebase aborted, when either step fails; the caller retries later.
