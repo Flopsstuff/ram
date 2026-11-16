@@ -39,27 +39,21 @@ curl -sI https://<AUTH_DOMAIN>/.well-known/openid-configuration         # Authel
 curl -sI https://<MCP_DOMAIN>/.well-known/oauth-authorization-server    # OIDC/multi-auth on: 200
 ```
 
-CI/CD: `.github/workflows/deploy.yml` deploys to a self-hosted runner on push to `main` (and a
+**The stack must work from `docker compose up -d` alone**: someone fills in the config files
+once and has the whole service. Anything the service does on a schedule therefore runs inside
+the stack (git sync, the bucket mirror, the OKF upkeep), never in a GitHub workflow. CD is an
+optional layer on top, and this production instance uses it.
+
+CI/CD (optional): `.github/workflows/deploy.yml` deploys to a self-hosted runner on push to `main` (and a
 weekly image-refresh cron), materializing every gitignored config from a GitHub secret first
 (see Configuration). "Verification" means the curls above, plus a headless agent connecting with
 the bearer (`claude mcp add -t http -s user brain https://<MCP_DOMAIN>/mcp -H "Authorization: Bearer <TOKEN>"`),
 plus a GUI client completing the OAuth flow (add `https://<MCP_DOMAIN>/mcp`, Auth = OAuth → log in at `<AUTH_DOMAIN>`).
 
-`.github/workflows/okf-maintenance.yml` runs nightly (02:30 UTC) on the same runner and in the
-same `ram-deploy` queue. It pipes `scripts/okf_maintenance.py` into the server container, which
-calls the server's own MCP tools on localhost with the bearer from the container's env, so every
-change is an ordinary server write: `okf_convert_links` (wikilinks the wiki inserts), `.md` added
-to extensionless links SilverBullet leaves after a rename, `okf_generate_index` for the root
-**and every folder** (a root call only creates missing indexes, it never refreshes existing
-ones), then `okf_validate` + `get_broken_links`; the job fails on a conformance failure or a
-broken link. It has **no checkout step on purpose**: `git clean` would delete the gitignored
-`.env` and config files the running containers bind-mount from the same workspace, so it runs
-the script from the last deploy's checkout.
-
 ## Architecture
 
-Seven services in `docker-compose.yml` (compose project `ram-brain`): the MCP stack (the first
-three), the browser wiki (the next three) and the optional bucket mirror (the last one).
+Eight services in `docker-compose.yml` (compose project `ram-brain`): the MCP stack (the first
+three), the browser wiki (the next three), the optional bucket mirror and the OKF upkeep.
 
 **Storage modes.** All four are set in `.env`; nothing in `docker-compose.yml` changes between
 them. The switch for git is `MARKDOWN_VAULT_MCP_GIT_REPO_URL` (read by the server, `wiki-sync`
@@ -237,6 +231,32 @@ and `vault-mirror` alike), the switch for the bucket is `BUCKET_NAME`.
     script's process: a `docker compose exec vault-mirror rclone …` has no `store:` remote.
   - `init: true`, because `sh` as PID 1 would ignore SIGTERM. The bucket must already exist.
 
+- **`okf-maintenance`** — the daily OKF upkeep: the server's own image running
+  `scripts/okf_maintenance.py --schedule` (mounted `:ro`), as user 1000, no volume, no
+  `ports:`. It used to be a GitHub workflow on the CD runner, which an install without a
+  runner never ran. Once a day at `OKF_MAINTENANCE_AT` (default `02:30`, in `TZ`, default UTC;
+  `off` disables it) it runs the script as a child process, which calls the server's MCP tools
+  over the compose network (`OKF_MCP_URL`) with the bearer, so every change is an ordinary
+  server write: `okf_convert_links` (wikilinks the wiki inserts), `.md` added to extensionless
+  links SilverBullet leaves after a rename, `okf_generate_index` for the root **and every
+  folder** (a root call only creates missing indexes, it never refreshes existing ones), then
+  `okf_validate` + `get_broken_links`. Non-obvious knobs:
+  - **The report is this container's log** (`docker compose logs okf-maintenance`); nothing
+    else shows that the audit found a broken link or a note without `type`. A run exits 0
+    clean, 1 when the audit found something, 2 when it could not run.
+  - **A run that could not reach the server is retried** after 10 minutes, three attempts in
+    all: a deploy may be recreating the server at that moment. (The old workflow sat in the
+    `ram-deploy` queue for the same reason.)
+  - **It gets only the variables it reads**, through `environment:` interpolation from `.env`,
+    not the whole `env_file`: the bearer, the OKF mode, the schedule, `TZ` and the retry
+    pause (`OKF_MAINTENANCE_RETRY_S`, default 600; not in `.env.example`, few need it). A
+    variable the script reads has to be listed there, or `.env` cannot set it.
+  - **The image's healthcheck is disabled** here: it probes a server on localhost.
+  - It idles, with one log line saying why, when `MARKDOWN_VAULT_MCP_OKF_MODE` is `off`, the
+    bearer is missing, or the time is not `HH:MM`. A server without OKF tools makes a run a
+    no-op.
+  - Run it now: `docker compose exec okf-maintenance python /etc/ram/scripts/okf_maintenance.py`.
+
 **Boot-time reindex.** The server decides what changed by diffing the vault against
 `/data/state.json`, a path→SHA-256 snapshot. Older server versions rewrote that snapshot only on
 a full reindex, so every note written through MCP since the last one came back as `added` at the
@@ -287,6 +307,9 @@ config, `OIDC_JWT_SIGNING_KEY` = stable 64-hex, `OIDC_REQUIRED_SCOPES=openid,ema
 two cloudflared vars (`CF_TUNNEL_ID`, `TUNNEL_CRED_CONTENTS`). **`AUTH_MODE` is intentionally
 unset** — auto-detect enables multi-auth from bearer + OIDC both being present; forcing
 `AUTH_MODE=oidc-proxy` risks disabling the bearer path.
+
+`OKF_MAINTENANCE_AT` (and `TZ`) set when the `okf-maintenance` service runs; both have no
+prefix, and a `.env` without them means 02:30 UTC.
 
 The storage block picks the mode (table under Architecture). Its variables:
 
@@ -359,8 +382,8 @@ for the runner (it reads the secret, not git).
 - **Config-mounted services must be force-recreated to reload.** `docker compose up -d` does NOT
   recreate a container when only a bind-mounted config FILE's contents change, so `deploy.yml`
   force-recreates `authelia` + `cloudflared` after re-materializing their configs, and
-  `markdown-vault-mcp`, `wiki-proxy`, `wiki-sync` + `vault-mirror` for their bind-mounted patch,
-  Caddyfile, sync script and mirror script. A plain
+  `markdown-vault-mcp`, `wiki-proxy`, `wiki-sync`, `vault-mirror` + `okf-maintenance` for their
+  bind-mounted patch, Caddyfile, sync script, mirror script and upkeep script. A plain
   `up -d` (or editing the file on the host) silently keeps the stale in-memory config.
 - **OIDC client (`ram-brain`) must satisfy the MCP OAuth flow, or login half-works then fails:**
   its `audience` whitelist must include the MCP resource (`https://<MCP_DOMAIN>` and
